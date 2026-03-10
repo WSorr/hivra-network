@@ -1,130 +1,27 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
 
-# Virtual environments
-venv/
-env/
-.venv/
-
-# IDE
-.vscode/
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
 .idea/
-*.swp
-*.swo
-*~
 
-# OS
-.DS_Store
-Thumbs.db
+# Flutter
+/flutter/build/
+/flutter/ios/Flutter/App.framework
+/flutter/ios/Flutter/Flutter.framework
+/flutter/ios/Pods/
+/flutter/macos/Pods/
+/flutter/android/.gradle/
+/flutter/android/app/build/
+/flutter/.dart_tool/
+/flutter/.packages
+/flutter/pubspec.lock
 
-# Project specific
-.capsulenet/
-*.log
-*.sqlite
-*.sqlite3
+# FFI
+/platform/**/*.a
+/platform/**/*.so
+/platform/**/*.dylib
+/platform/**/*.dll
 
-# Test coverage
-.coverage
-htmlcov/
-
-# Jupyter
-.ipynb_checkpoints
-
-# Temp files
-*.tmp
-*.temp
-
-# User data (should not be committed)
-*.json
-!requirements.txt
-!pyproject.toml
-!setup.py
-!
-E0F
-cat > .gitignore << 'EOF'
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual environments
-venv/
-env/
-.venv/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Project specific
-.capsulenet/
-*.log
-*.sqlite
-*.sqlite3
-
-# Test coverage
-.coverage
-htmlcov/
-
-# Jupyter
-.ipynb_checkpoints
-
-# Temp files
-*.tmp
-*.temp
-
-# User data (should not be committed)
-*.json
-!requirements.txt
-!pyproject.toml
-!setup.py
-!VERSION
-!CHANGELOG.md
-!README.md
-!pytest.ini
-
-# Test files (keep in repo)
-!tests/
+# Local tooling
+/.tooling/

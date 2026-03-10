@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "core/hivra-core",
+    "core/hivra-engine", 
+    "core/hivra-transport",
+    "core/hivra-nostr-crypto",
+    "platform/hivra-keystore",
+    "platform/hivra-ffi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Hivra Team"]

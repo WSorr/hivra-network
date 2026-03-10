@@ -1,0 +1,28 @@
+name: hivra_app
+description: Hivra - Hive Integrated Value & Relationship Architecture
+publish_to: 'none'
+version: 3.2.9+1
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  ffi: ^2.1.0
+  path_provider: ^2.1.1
+  bech32: ^0.2.2
+  flutter_secure_storage: ^10.0.0
+  qr_flutter: ^4.1.0
+  mobile_scanner: ^7.2.0
+  share_plus: ^12.0.1
+  file_selector: ^1.1.0
+  flutter_rust_bridge: ^2.11.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

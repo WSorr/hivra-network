@@ -1,0 +1,22 @@
+[package]
+name = "hivra-transport"
+version = "3.2.0"
+edition = "2021"
+authors = ["Hivra Team"]
+license = "MIT"
+description = "Transport layer for Hivra"
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+hivra-core = { path = "../hivra-core" }
+nostr-sdk = "0.36"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures = "0.3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
+
+[features]
+default = ["std"]
+std = []

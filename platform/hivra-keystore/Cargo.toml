@@ -1,0 +1,23 @@
+[package]
+name = "hivra-keystore"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+zeroize = { version = "1.7", features = ["zeroize_derive"] }
+thiserror = "1.0"
+hkdf = "0.12"
+sha2 = "0.10"
+bip39 = { version = "2.0", default-features = false, features = ["std"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }  # Feature for native Apple Keychain
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+[dev-dependencies]
+tempfile = "3.8"

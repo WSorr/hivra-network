@@ -1,7 +1,0 @@
-# Hivra CapsuleNet V1
-# No external dependencies required for core functionality
-# Python 3.8+
-
-# Optional development dependencies:
-# pytest>=6.0.0
-# black>=22.0.0

@@ -1,0 +1,3 @@
+rust_input: ../platform/hivra-ffi/src/lib.rs
+dart_output: lib/ffi/hivra_bindings.dart
+c_output: ../platform/hivra-ffi/src/hivra_bindings.rs

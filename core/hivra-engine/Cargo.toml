@@ -1,0 +1,14 @@
+[package]
+name = "hivra-engine"
+version = "3.2.0"
+edition = "2021"
+authors = ["Hivra Team"]
+license = "MIT"
+description = "Orchestration layer for Hivra protocol"
+
+[dependencies]
+hivra-core = { path = "../hivra-core" }
+
+[features]
+default = ["std"]
+std = []

@@ -9,8 +9,7 @@ use hivra_core::{
     event::{Event, EventKind},
     event_payloads::{
         CapsuleCreatedPayload, EventPayload, InvitationAcceptedPayload, InvitationRejectedPayload,
-        InvitationSentPayload, RejectReason, RelationshipEstablishedPayload, StarterBurnedPayload,
-        StarterCreatedPayload,
+        InvitationSentPayload, RejectReason, StarterBurnedPayload, StarterCreatedPayload,
     },
     Ledger, Network, PubKey, Signature, StarterId, StarterKind, Timestamp,
 };
@@ -28,7 +27,6 @@ use hivra_transport::{Message, Transport, TransportError};
 use nostr_sdk::prelude::{Keys, SecretKey};
 use once_cell::sync::Lazy;
 use rand::RngCore;
-use serde::Deserialize;
 use serde_json;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -204,13 +202,6 @@ fn export_runtime_ledger() -> Result<String, &'static str> {
     serde_json::to_string(&value).map_err(|_| "serialization failed")
 }
 
-#[derive(Deserialize)]
-struct LedgerBackupEnvelopeV1 {
-    schema: String,
-    version: u32,
-    ledger: Ledger,
-}
-
 fn normalize_ledger_last_hash(value: &mut serde_json::Value) {
     if let serde_json::Value::Object(map) = value {
         if let Some(raw) = map.get("last_hash") {
@@ -384,10 +375,6 @@ fn starter_kind_from_slot(slot: u8) -> Option<StarterKind> {
         4 => Some(StarterKind::Kick),
         _ => None,
     }
-}
-
-fn slot_from_starter_id(seed: &Seed, starter_id: &[u8; 32]) -> Option<u8> {
-    (0..5u8).find(|slot| derive_starter_id(seed, *slot) == *starter_id)
 }
 
 fn capsule_network() -> Result<Network, &'static str> {
@@ -1622,6 +1609,7 @@ pub unsafe extern "C" fn free_bytes(ptr: *mut u8, len: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hivra_core::event_payloads::RelationshipEstablishedPayload;
     use std::sync::Mutex;
 
     static TEST_GUARD: Mutex<()> = Mutex::new(());

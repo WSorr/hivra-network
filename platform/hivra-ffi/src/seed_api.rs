@@ -67,14 +67,6 @@ pub unsafe extern "C" fn hivra_generate_random_seed(out_seed: *mut u8) -> i32 {
     0
 }
 
-/// Free string allocated by FFI
-#[no_mangle]
-pub unsafe extern "C" fn hivra_free_string(ptr: *mut c_char) {
-    if !ptr.is_null() {
-        let _ = CString::from_raw(ptr);
-    }
-}
-
 // ============ KEYCHAIN FUNCTIONS ============
 
 /// Check if seed exists in keystore

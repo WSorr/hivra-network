@@ -5,18 +5,25 @@ import '../models/relationship.dart';
 import '../models/starter.dart';
 import '../widgets/relationship_card.dart';
 import '../ffi/hivra_bindings.dart';
+import '../services/capsule_persistence_service.dart';
 import '../services/ledger_view_service.dart';
 
 class RelationshipsScreen extends StatefulWidget {
   final HivraBindings hivra;
+  final Future<void> Function()? onLedgerChanged;
 
-  const RelationshipsScreen({super.key, required this.hivra});
+  const RelationshipsScreen({
+    super.key,
+    required this.hivra,
+    this.onLedgerChanged,
+  });
 
   @override
   State<RelationshipsScreen> createState() => _RelationshipsScreenState();
 }
 
 class _RelationshipsScreenState extends State<RelationshipsScreen> {
+  final CapsulePersistenceService _persistence = CapsulePersistenceService();
   List<Relationship> _relationships = [];
   bool _isLoading = true;
   String? _filterKind;
@@ -35,7 +42,7 @@ class _RelationshipsScreenState extends State<RelationshipsScreen> {
     });
   }
 
-  void _breakRelationship(Relationship relationship) {
+  Future<void> _breakRelationship(Relationship relationship) async {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -53,7 +60,7 @@ class _RelationshipsScreenState extends State<RelationshipsScreen> {
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.red,
             ),
-            onPressed: () {
+            onPressed: () async {
               final peer = _decodeB64_32(relationship.peerPubkey);
               final own = _decodeB64_32(relationship.ownStarterId);
               if (peer == null || own == null) {
@@ -74,7 +81,9 @@ class _RelationshipsScreenState extends State<RelationshipsScreen> {
                 );
                 return;
               }
-              _loadRelationships();
+              await _persistence.persistLedgerSnapshot(widget.hivra);
+              await _loadRelationships();
+              await widget.onLedgerChanged?.call();
             },
             child: const Text('Break'),
           ),

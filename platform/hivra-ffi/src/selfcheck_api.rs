@@ -75,11 +75,3 @@ pub unsafe extern "C" fn hivra_nostr_send_prepared_self_check() -> i32 {
         Err(_) => -5,
     }
 }
-
-/// Free memory allocated by capsule_state_encode
-#[no_mangle]
-pub unsafe extern "C" fn free_bytes(ptr: *mut u8, len: usize) {
-    if !ptr.is_null() {
-        let _ = Vec::from_raw_parts(ptr, len, len);
-    }
-}

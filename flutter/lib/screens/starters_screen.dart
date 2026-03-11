@@ -8,8 +8,13 @@ import '../services/capsule_persistence_service.dart';
 
 class StartersScreen extends StatefulWidget {
   final HivraBindings hivra;
+  final Future<void> Function()? onLedgerChanged;
 
-  const StartersScreen({super.key, required this.hivra});
+  const StartersScreen({
+    super.key,
+    required this.hivra,
+    this.onLedgerChanged,
+  });
 
   @override
   State<StartersScreen> createState() => _StartersScreenState();
@@ -71,7 +76,7 @@ class _StartersScreenState extends State<StartersScreen> {
         'type': slotState?.kind ?? 'Unknown',
         'starterId': id != null ? _formatStarterId(id) : null,
         'starterIdRaw': id,
-        'locked': false,
+        'locked': slotState?.locked ?? false,
       });
     }
 
@@ -160,9 +165,11 @@ class _StartersScreenState extends State<StartersScreen> {
           ),
           ElevatedButton(
             onPressed: () async {
+              final navigator = Navigator.of(context);
+              final messenger = ScaffoldMessenger.of(this.context);
               final input = pubkeyController.text.trim();
               if (input.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                messenger.showSnackBar(
                   const SnackBar(content: Text('Please enter public key')),
                 );
                 return;
@@ -170,7 +177,7 @@ class _StartersScreenState extends State<StartersScreen> {
               
               final pubkeyBytes = _decodePubkey(input);
               if (pubkeyBytes == null) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                messenger.showSnackBar(
                   const SnackBar(content: Text('Invalid public key format')),
                 );
                 return;
@@ -192,18 +199,21 @@ class _StartersScreenState extends State<StartersScreen> {
                   throw Exception('ledger snapshot was not saved');
                 }
 
-                Navigator.pop(context);
+                navigator.pop();
                 if (!mounted) return;
                 final peerPreview = input.length <= 8 ? input : '${input.substring(0, 8)}...';
-                ScaffoldMessenger.of(context).showSnackBar(
+                messenger.showSnackBar(
                   SnackBar(content: Text('Invitation sent to $peerPreview')),
                 );
 
                 setState(() {
                   slot['locked'] = true;
                 });
+                _loadSlots();
+                await widget.onLedgerChanged?.call();
               } catch (e) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                if (!mounted) return;
+                messenger.showSnackBar(
                   SnackBar(content: Text('Failed to send: $e')),
                 );
               }

@@ -1,6 +1,4 @@
 import 'dart:io';
-import 'dart:typed_data';
-
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import '../ffi/hivra_bindings.dart';
@@ -87,12 +85,14 @@ class _CapsuleSelectorScreenState extends State<CapsuleSelectorScreen> {
   }
 
   Future<void> _selectCapsule(CapsuleInfo capsule) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
     final persistence = CapsulePersistenceService();
     try {
       await persistence.activateCapsule(_hivra, capsule.publicKeyHex);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.showSnackBar(
         SnackBar(content: Text('Failed to activate capsule: $e')),
       );
       return;
@@ -102,7 +102,7 @@ class _CapsuleSelectorScreenState extends State<CapsuleSelectorScreen> {
         await persistence.bootstrapActiveCapsuleRuntime(_hivra);
     if (!bootstrapped && mounted) {
       final reason = await persistence.diagnoseActiveCapsuleBootstrap(_hivra);
-      ScaffoldMessenger.of(context).showSnackBar(
+      messenger.showSnackBar(
         SnackBar(
           content: Text(
             reason == null
@@ -115,8 +115,7 @@ class _CapsuleSelectorScreenState extends State<CapsuleSelectorScreen> {
     }
 
     if (!mounted) return;
-    Navigator.pushReplacement(
-      context,
+    navigator.pushReplacement(
       MaterialPageRoute(builder: (_) => const MainScreen()),
     );
   }
@@ -394,6 +393,7 @@ class _CapsuleSelectorScreenState extends State<CapsuleSelectorScreen> {
   Future<void> _showCapsuleMenu(CapsuleInfo capsule) async {
     final persistence = CapsulePersistenceService();
     final hasSeed = await persistence.hasStoredSeed(capsule.publicKeyHex);
+    if (!mounted) return;
     final action = await showModalBottomSheet<String>(
       context: context,
       builder: (ctx) {
@@ -449,13 +449,6 @@ class _CapsuleSelectorScreenState extends State<CapsuleSelectorScreen> {
     }
   }
 
-  String _bytesToHex(Uint8List bytes) {
-    final b = StringBuffer();
-    for (final byte in bytes) {
-      b.write(byte.toRadixString(16).padLeft(2, '0'));
-    }
-    return b.toString();
-  }
 }
 
 class CapsuleInfo {

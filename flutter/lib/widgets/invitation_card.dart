@@ -53,7 +53,7 @@ class InvitationCard extends StatelessWidget {
                     vertical: 2,
                   ),
                   decoration: BoxDecoration(
-                    color: invitation.status.color.withOpacity(0.1),
+                    color: invitation.status.color.withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(

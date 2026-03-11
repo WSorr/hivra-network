@@ -2,11 +2,14 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:path_provider/path_provider.dart';
-
 import '../ffi/hivra_bindings.dart';
 import 'capsule_backup_codec.dart';
+import 'capsule_file_store.dart';
+import 'capsule_index_store.dart';
+import 'capsule_ledger_summary_parser.dart';
+import 'capsule_persistence_models.dart';
+import 'capsule_runtime_bootstrap_service.dart';
+import 'capsule_seed_store.dart';
 
 class CapsulePersistenceService {
   static final CapsulePersistenceService _instance =
@@ -14,16 +17,17 @@ class CapsulePersistenceService {
 
   factory CapsulePersistenceService() => _instance;
 
-  CapsulePersistenceService._internal();
+  CapsulePersistenceService._internal() {
+    _runtimeBootstrapService =
+        CapsuleRuntimeBootstrapService(_fileStore, _seedStore);
+  }
 
-  static const String _stateFileName = 'capsule_state.json';
-  static const String _ledgerFileName = 'ledger.json';
-  static const String _backupFileName = 'capsule-backup.v1.json';
-  static const String _capsulesDirName = 'capsules';
-  static const String _indexFileName = 'capsules_index.json';
-  static const String _seedKeyPrefix = 'hivra.seed.';
-  static const String _seedFallbackFileName = 'capsule_seeds.json';
-  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
+  final CapsuleFileStore _fileStore = const CapsuleFileStore();
+  final CapsuleIndexStore _indexStore = const CapsuleIndexStore();
+  final CapsuleLedgerSummaryParser _summaryParser =
+      const CapsuleLedgerSummaryParser();
+  final CapsuleSeedStore _seedStore = const CapsuleSeedStore();
+  late final CapsuleRuntimeBootstrapService _runtimeBootstrapService;
 
   Future<void> persistAfterCreate({
     required HivraBindings hivra,
@@ -35,27 +39,24 @@ class CapsulePersistenceService {
     final pubKeyHex = pubKey != null ? _bytesToHex(pubKey) : null;
     final dir = await _currentCapsuleDir(hivra, create: true);
 
-    final stateFile = File('${dir.path}/$_stateFileName');
     final state = <String, dynamic>{
       'isGenesis': isGenesis,
       'isNeste': isNeste,
       'createdAt': DateTime.now().toUtc().toIso8601String(),
       'seedLength': seed.length,
     };
-    await stateFile.writeAsString(jsonEncode(state), flush: true);
+    await _fileStore.writeState(dir, state);
 
     final ledger = hivra.exportLedger();
     if (ledger != null && ledger.isNotEmpty) {
-      final ledgerFile = File('${dir.path}/$_ledgerFileName');
-      await ledgerFile.writeAsString(ledger, flush: true);
+      await _fileStore.writeLedger(dir, ledger);
 
       final backupJson = CapsuleBackupCodec.encodeBackupEnvelope(
         ledgerJson: ledger,
         isGenesis: isGenesis,
         isNeste: isNeste,
       );
-      final backupFile = File('${dir.path}/$_backupFileName');
-      await backupFile.writeAsString(backupJson, flush: true);
+      await _fileStore.writeBackup(dir, backupJson);
     }
 
     if (pubKeyHex != null) {
@@ -87,13 +88,10 @@ class CapsulePersistenceService {
 
   Future<bool> importLedgerIfExists(HivraBindings hivra) async {
     final dir = await _currentCapsuleDir(hivra);
-    final ledgerFile = File('${dir.path}/$_ledgerFileName');
-    if (await ledgerFile.exists()) {
-      final ledgerJson = await ledgerFile.readAsString();
-      if (ledgerJson.trim().isNotEmpty && hivra.importLedger(ledgerJson)) {
-        await _touchActiveCapsule(hivra);
-        return true;
-      }
+    final ledgerJson = await _fileStore.readLedger(dir);
+    if (ledgerJson != null && hivra.importLedger(ledgerJson)) {
+      await _touchActiveCapsule(hivra);
+      return true;
     }
     return importBackupEnvelopeIfExists(hivra);
   }
@@ -103,8 +101,7 @@ class CapsulePersistenceService {
     if (ledger == null || ledger.isEmpty) return false;
 
     final dir = await _currentCapsuleDir(hivra, create: true);
-    final ledgerFile = File('${dir.path}/$_ledgerFileName');
-    await ledgerFile.writeAsString(ledger, flush: true);
+    await _fileStore.writeLedger(dir, ledger);
     await _touchActiveCapsule(hivra);
     return true;
   }
@@ -121,18 +118,15 @@ class CapsulePersistenceService {
     );
 
     final dir = await _currentCapsuleDir(hivra, create: true);
-    final backupFile = File('${dir.path}/$_backupFileName');
-    await backupFile.writeAsString(backupJson, flush: true);
+    await _fileStore.writeBackup(dir, backupJson);
     await _touchActiveCapsule(hivra);
-    return backupFile.path;
+    return _fileStore.backupPath(dir);
   }
 
   Future<bool> importBackupEnvelopeIfExists(HivraBindings hivra) async {
     final dir = await _currentCapsuleDir(hivra);
-    final backupFile = File('${dir.path}/$_backupFileName');
-    if (!await backupFile.exists()) return false;
-
-    final backupJson = await backupFile.readAsString();
+    final backupJson = await _fileStore.readBackup(dir);
+    if (backupJson == null) return false;
     final ledgerJson = CapsuleBackupCodec.tryExtractLedgerJson(backupJson);
     if (ledgerJson == null) return false;
     final imported = hivra.importLedger(ledgerJson);
@@ -145,19 +139,7 @@ class CapsulePersistenceService {
   Future<void> clearPersistedData(HivraBindings hivra,
       {bool includeBackup = false}) async {
     final dir = await _currentCapsuleDir(hivra);
-    final stateFile = File('${dir.path}/$_stateFileName');
-    final ledgerFile = File('${dir.path}/$_ledgerFileName');
-    final backupFile = File('${dir.path}/$_backupFileName');
-
-    if (await stateFile.exists()) {
-      await stateFile.delete();
-    }
-    if (await ledgerFile.exists()) {
-      await ledgerFile.delete();
-    }
-    if (includeBackup && await backupFile.exists()) {
-      await backupFile.delete();
-    }
+    await _fileStore.clearPersisted(dir, includeBackup: includeBackup);
   }
 
   Future<String?> resolveActiveCapsuleHex(HivraBindings hivra) async {
@@ -250,12 +232,12 @@ class CapsulePersistenceService {
 
   Future<String> getCurrentBackupPath(HivraBindings hivra) async {
     final dir = await _currentCapsuleDir(hivra, create: true);
-    return '${dir.path}/$_backupFileName';
+    return _fileStore.backupPath(dir);
   }
 
   Future<String> getCurrentLedgerPath(HivraBindings hivra) async {
     final dir = await _currentCapsuleDir(hivra, create: true);
-    return '${dir.path}/$_ledgerFileName';
+    return _fileStore.ledgerPath(dir);
   }
 
   Future<List<CapsuleIndexEntry>> listCapsules({HivraBindings? hivra}) async {
@@ -272,15 +254,13 @@ class CapsulePersistenceService {
   }
 
   Future<CapsuleLedgerSummary> loadCapsuleSummary(String pubKeyHex) async {
-    final docs = await getApplicationDocumentsDirectory();
-    final capsuleDir = Directory('${docs.path}/$_capsulesDirName/$pubKeyHex');
-    final ledgerFile = File('${capsuleDir.path}/$_ledgerFileName');
-    if (!await ledgerFile.exists()) {
+    final capsuleDir = await _capsuleDirForHex(pubKeyHex);
+    final raw = await _fileStore.readLedger(capsuleDir);
+    if (raw == null) {
       return CapsuleLedgerSummary.empty();
     }
     try {
-      final raw = await ledgerFile.readAsString();
-      return _parseLedgerSummary(raw);
+      return _summaryParser.parse(raw, _bytesToHex);
     } catch (_) {
       return CapsuleLedgerSummary.empty();
     }
@@ -290,74 +270,44 @@ class CapsulePersistenceService {
     String pubKeyHex, {
     HivraBindings? hivra,
   }) async {
-    final seed = hivra == null
-        ? await _loadSeedForCapsule(pubKeyHex)
-        : await _loadValidatedSeedForCapsule(hivra, pubKeyHex);
-    if (seed == null) return null;
-
-    final state = await _readStateForCapsuleHex(pubKeyHex);
-    final isGenesis = state?['isGenesis'] == true;
-    final isNeste = state?['isNeste'] != false;
-
-    final dir = await _capsuleDirForHex(pubKeyHex, create: true);
-    final ledgerFile = File('${dir.path}/$_ledgerFileName');
-
-    String? ledgerJson;
-    if (await ledgerFile.exists()) {
-      final raw = await ledgerFile.readAsString();
-      if (raw.trim().isNotEmpty) {
-        ledgerJson = raw;
-      }
-    } else {
-      final backupFile = File('${dir.path}/$_backupFileName');
-      if (await backupFile.exists()) {
-        final backupJson = await backupFile.readAsString();
-        final extracted = CapsuleBackupCodec.tryExtractLedgerJson(backupJson);
-        if (extracted != null && extracted.trim().isNotEmpty) {
-          ledgerJson = extracted;
-        }
-      }
-    }
-
-    return CapsuleRuntimeBootstrap(
-      pubKeyHex: pubKeyHex,
-      seed: seed,
-      isGenesis: isGenesis,
-      isNeste: isNeste,
-      ledgerJson: ledgerJson,
+    return _runtimeBootstrapService.loadRuntimeBootstrap(
+      pubKeyHex,
+      hivra: hivra,
+      bytesToHex: _bytesToHex,
     );
   }
 
   Future<CapsuleRuntimeBootstrap?> loadRuntimeBootstrapForCurrent(
       HivraBindings hivra) async {
-    final pubKey = hivra.capsulePublicKey();
-    final seed = hivra.loadSeed();
-    if (pubKey == null || pubKey.length != 32 || seed == null) return null;
-
-    final state = await _readStateForCurrentCapsule(hivra);
-    final isGenesis = state?['isGenesis'] == true;
-    final isNeste = state?['isNeste'] != false;
-    final ledgerJson = hivra.exportLedger();
-
-    return CapsuleRuntimeBootstrap(
-      pubKeyHex: _bytesToHex(pubKey),
-      seed: seed,
-      isGenesis: isGenesis,
-      isNeste: isNeste,
-      ledgerJson:
-          (ledgerJson != null && ledgerJson.isNotEmpty) ? ledgerJson : null,
+    return _runtimeBootstrapService.loadRuntimeBootstrapForCurrent(
+      hivra,
+      bytesToHex: _bytesToHex,
     );
+  }
+
+  Future<Map<String, Object?>?> loadWorkerBootstrapArgs(
+      HivraBindings hivra) async {
+    final activeHex = await resolveActiveCapsuleHex(hivra);
+    CapsuleRuntimeBootstrap? bootstrap;
+    if (activeHex != null && activeHex.isNotEmpty) {
+      bootstrap = await loadRuntimeBootstrap(activeHex);
+    }
+    bootstrap ??= await loadRuntimeBootstrapForCurrent(hivra);
+    if (bootstrap == null) return null;
+
+    return <String, Object?>{
+      'seed': bootstrap.seed,
+      'isGenesis': bootstrap.isGenesis,
+      'isNeste': bootstrap.isNeste,
+      'ledgerJson': bootstrap.ledgerJson,
+    };
   }
 
   Future<String?> exportCapsuleBackupToPath(
       String pubKeyHex, String targetPath) async {
-    final docs = await getApplicationDocumentsDirectory();
-    final capsuleDir = Directory('${docs.path}/$_capsulesDirName/$pubKeyHex');
-    final ledgerFile = File('${capsuleDir.path}/$_ledgerFileName');
-    if (!await ledgerFile.exists()) return null;
-
-    final ledgerJson = await ledgerFile.readAsString();
-    if (ledgerJson.trim().isEmpty) return null;
+    final capsuleDir = await _capsuleDirForHex(pubKeyHex);
+    final ledgerJson = await _fileStore.readLedger(capsuleDir);
+    if (ledgerJson == null) return null;
 
     final backupJson = CapsuleBackupCodec.encodeBackupEnvelope(
       ledgerJson: ledgerJson,
@@ -369,39 +319,11 @@ class CapsulePersistenceService {
 
   Future<bool> refreshCapsuleSnapshot(
       HivraBindings hivra, String pubKeyHex) async {
-    final seed = await _loadValidatedSeedForCapsule(hivra, pubKeyHex);
-    if (seed == null) return false;
-    if (!hivra.saveSeed(seed)) return false;
-
-    final state = await _readStateForCapsuleHex(pubKeyHex);
-    final isGenesis = state?['isGenesis'] == true;
-    final isNeste = state?['isNeste'] != false;
-    if (!hivra.createCapsule(seed, isGenesis: isGenesis, isNeste: isNeste)) {
-      return false;
-    }
-
-    final dir = await _capsuleDirForHex(pubKeyHex, create: true);
-    final ledgerFile = File('${dir.path}/$_ledgerFileName');
-    if (await ledgerFile.exists()) {
-      final ledgerJson = await ledgerFile.readAsString();
-      if (ledgerJson.trim().isNotEmpty) {
-        hivra.importLedger(ledgerJson);
-      }
-    } else {
-      final backupFile = File('${dir.path}/$_backupFileName');
-      if (await backupFile.exists()) {
-        final backupJson = await backupFile.readAsString();
-        final ledgerJson = CapsuleBackupCodec.tryExtractLedgerJson(backupJson);
-        if (ledgerJson != null && ledgerJson.trim().isNotEmpty) {
-          hivra.importLedger(ledgerJson);
-        }
-      }
-    }
-
-    final exported = hivra.exportLedger();
-    if (exported == null || exported.isEmpty) return false;
-    await ledgerFile.writeAsString(exported, flush: true);
-    return true;
+    return _runtimeBootstrapService.refreshCapsuleSnapshot(
+      hivra,
+      pubKeyHex,
+      bytesToHex: _bytesToHex,
+    );
   }
 
   Future<String?> importCapsuleFromBackupJson(String rawJson) async {
@@ -411,17 +333,9 @@ class CapsulePersistenceService {
     final ownerHex = _extractOwnerHex(ledgerJson);
     if (ownerHex == null) return null;
 
-    final docs = await getApplicationDocumentsDirectory();
-    final capsuleDir = Directory('${docs.path}/$_capsulesDirName/$ownerHex');
-    if (!await capsuleDir.exists()) {
-      await capsuleDir.create(recursive: true);
-    }
-
-    final ledgerFile = File('${capsuleDir.path}/$_ledgerFileName');
-    await ledgerFile.writeAsString(ledgerJson, flush: true);
-
-    final backupFile = File('${capsuleDir.path}/$_backupFileName');
-    await backupFile.writeAsString(rawJson, flush: true);
+    final capsuleDir = await _capsuleDirForHex(ownerHex, create: true);
+    await _fileStore.writeLedger(capsuleDir, ledgerJson);
+    await _fileStore.writeBackup(capsuleDir, rawJson);
 
     final meta = _extractBackupMeta(rawJson);
     await _upsertCapsuleIndex(
@@ -436,17 +350,9 @@ class CapsulePersistenceService {
   Future<void> deleteCapsule(String pubKeyHex,
       {bool deleteLocalData = false}) async {
     if (deleteLocalData) {
-      final docs = await getApplicationDocumentsDirectory();
-      final capsuleDir = Directory('${docs.path}/$_capsulesDirName/$pubKeyHex');
-      if (await capsuleDir.exists()) {
-        await capsuleDir.delete(recursive: true);
-      }
+      await _fileStore.deleteCapsuleDir(pubKeyHex);
     }
-    try {
-      await _secureStorage.delete(key: '$_seedKeyPrefix$pubKeyHex');
-    } catch (_) {
-      await _deleteSeedFallback(pubKeyHex);
-    }
+    await _seedStore.deleteSeed(pubKeyHex);
     final index = await _readIndex();
     index.capsules.remove(pubKeyHex);
     if (index.activePubKeyHex == pubKeyHex) {
@@ -456,10 +362,7 @@ class CapsulePersistenceService {
   }
 
   Future<bool> hasStoredSeed(String pubKeyHex) async {
-    String? encoded;
-    encoded = await _readSeedFromSecureStorage(pubKeyHex);
-    encoded ??= await _readSeedFallback(pubKeyHex);
-    return encoded != null && encoded.isNotEmpty;
+    return _seedStore.hasStoredSeed(pubKeyHex);
   }
 
   Future<bool> seedMatchesCapsule(
@@ -504,28 +407,12 @@ class CapsulePersistenceService {
   Future<Map<String, dynamic>?> _readStateForCurrentCapsule(
       HivraBindings hivra) async {
     final dir = await _currentCapsuleDir(hivra);
-    final stateFile = File('${dir.path}/$_stateFileName');
-    if (!await stateFile.exists()) return null;
-
-    try {
-      final raw = await stateFile.readAsString();
-      final decoded = jsonDecode(raw);
-      if (decoded is Map<String, dynamic>) return decoded;
-      if (decoded is Map) return Map<String, dynamic>.from(decoded);
-      return null;
-    } catch (_) {
-      return null;
-    }
+    return _fileStore.readState(dir);
   }
 
   Future<Directory> _currentCapsuleDir(HivraBindings? hivra,
       {bool create = false}) async {
-    final docs = await getApplicationDocumentsDirectory();
-    final capsulesRoot = Directory('${docs.path}/$_capsulesDirName');
-    if (create && !await capsulesRoot.exists()) {
-      await capsulesRoot.create(recursive: true);
-    }
-
+    final docs = await _fileStore.docsDirectory();
     String? capsuleId;
     if (hivra != null) {
       final pubKey = hivra.capsulePublicKey();
@@ -533,14 +420,12 @@ class CapsulePersistenceService {
         capsuleId = _bytesToHex(pubKey);
       }
     }
+    if (capsuleId == null || capsuleId.isEmpty) return docs;
 
-    if (capsuleId == null || capsuleId.isEmpty) {
-      return docs;
-    }
-
-    final dir = Directory('${capsulesRoot.path}/$capsuleId');
-    if (create && !await dir.exists()) {
-      await dir.create(recursive: true);
+    final dir = await _fileStore.capsuleDirForHex(capsuleId, create: false);
+    final existed = await dir.exists();
+    if (create && !existed) {
+      await _fileStore.capsuleDirForHex(capsuleId, create: true);
       await _migrateLegacyToCapsuleDir(docs, dir, capsuleId);
     }
     return dir;
@@ -548,14 +433,11 @@ class CapsulePersistenceService {
 
   Future<Directory> _capsuleDirForHex(String pubKeyHex,
       {bool create = false}) async {
-    final docs = await getApplicationDocumentsDirectory();
-    final capsulesRoot = Directory('${docs.path}/$_capsulesDirName');
-    if (create && !await capsulesRoot.exists()) {
-      await capsulesRoot.create(recursive: true);
-    }
-    final dir = Directory('${capsulesRoot.path}/$pubKeyHex');
-    if (create && !await dir.exists()) {
-      await dir.create(recursive: true);
+    final docs = await _fileStore.docsDirectory();
+    final dir = await _fileStore.capsuleDirForHex(pubKeyHex, create: false);
+    final existed = await dir.exists();
+    if (create && !existed) {
+      await _fileStore.capsuleDirForHex(pubKeyHex, create: true);
       await _migrateLegacyToCapsuleDir(docs, dir, pubKeyHex);
     }
     return dir;
@@ -566,9 +448,9 @@ class CapsulePersistenceService {
     Directory target,
     String pubKeyHex,
   ) async {
-    final legacyState = File('${docs.path}/$_stateFileName');
-    final legacyLedger = File('${docs.path}/$_ledgerFileName');
-    final legacyBackup = File('${docs.path}/$_backupFileName');
+    final legacyState = _fileStore.legacyStateFile(docs);
+    final legacyLedger = _fileStore.legacyLedgerFile(docs);
+    final legacyBackup = _fileStore.legacyBackupFile(docs);
 
     if (!await legacyLedger.exists()) return;
     try {
@@ -576,7 +458,7 @@ class CapsulePersistenceService {
       final decoded = jsonDecode(raw);
       if (decoded is! Map) return;
       final ledger = Map<String, dynamic>.from(decoded);
-      final ownerBytes = _parseBytesField(ledger['owner']);
+      final ownerBytes = _summaryParser.parseBytesField(ledger['owner']);
       if (ownerBytes == null) return;
       final ownerHex = _bytesToHex(Uint8List.fromList(ownerBytes));
       if (ownerHex != pubKeyHex) return;
@@ -585,61 +467,22 @@ class CapsulePersistenceService {
     }
 
     if (await legacyState.exists()) {
-      await legacyState.rename('${target.path}/$_stateFileName');
+      await legacyState.rename('${target.path}/${CapsuleFileStore.stateFileName}');
     }
     if (await legacyLedger.exists()) {
-      await legacyLedger.rename('${target.path}/$_ledgerFileName');
+      await legacyLedger.rename('${target.path}/${CapsuleFileStore.ledgerFileName}');
     }
     if (await legacyBackup.exists()) {
-      await legacyBackup.rename('${target.path}/$_backupFileName');
+      await legacyBackup.rename('${target.path}/${CapsuleFileStore.backupFileName}');
     }
   }
 
   Future<void> _storeSeedForCapsule(String pubKeyHex, Uint8List seed) async {
-    final encoded = base64Encode(seed);
-    try {
-      await _secureStorage.write(
-          key: '$_seedKeyPrefix$pubKeyHex', value: encoded);
-      return;
-    } catch (_) {
-      await _writeSeedFallback(pubKeyHex, encoded);
-    }
-  }
-
-  Future<String?> _readSeedFromSecureStorage(String pubKeyHex) async {
-    try {
-      return await _secureStorage.read(key: '$_seedKeyPrefix$pubKeyHex');
-    } catch (_) {
-      return null;
-    }
+    await _seedStore.storeSeed(pubKeyHex, seed);
   }
 
   Future<Uint8List?> _loadSeedForCapsule(String pubKeyHex) async {
-    var encoded = await _readSeedFromSecureStorage(pubKeyHex);
-    encoded ??= await _readSeedFallback(pubKeyHex);
-    return _decodeSeedString(encoded);
-  }
-
-  Future<Uint8List?> _loadValidatedSeedForCapsule(
-    HivraBindings hivra,
-    String pubKeyHex,
-  ) async {
-    final secureSeed = _decodeSeedString(
-      await _readSeedFromSecureStorage(pubKeyHex),
-    );
-    if (secureSeed != null &&
-        await seedMatchesCapsule(hivra, secureSeed, pubKeyHex)) {
-      return secureSeed;
-    }
-
-    final fallbackSeed = _decodeSeedString(await _readSeedFallback(pubKeyHex));
-    if (fallbackSeed != null &&
-        await seedMatchesCapsule(hivra, fallbackSeed, pubKeyHex)) {
-      await _storeSeedForCapsule(pubKeyHex, fallbackSeed);
-      return fallbackSeed;
-    }
-
-    return null;
+    return _seedStore.loadSeed(pubKeyHex);
   }
 
   Future<void> _touchActiveCapsule(HivraBindings hivra) async {
@@ -655,49 +498,23 @@ class CapsulePersistenceService {
     bool? isGenesis,
     bool? isNeste,
   }) async {
-    final index = await _readIndex();
-    final now = DateTime.now().toUtc();
-    final existing = index.capsules[pubKeyHex];
-    final entry = CapsuleIndexEntry(
-      pubKeyHex: pubKeyHex,
-      createdAt: existing?.createdAt ?? now,
-      lastActive: now,
-      isGenesis: isGenesis ?? existing?.isGenesis ?? false,
-      isNeste: isNeste ?? existing?.isNeste ?? true,
+    await _indexStore.upsert(
+      pubKeyHex,
+      isGenesis: isGenesis,
+      isNeste: isNeste,
     );
-    index.capsules[pubKeyHex] = entry;
-    await _writeIndex(index);
   }
 
   Future<void> _setActiveCapsule(String pubKeyHex) async {
-    final index = await _readIndex();
-    index.activePubKeyHex = pubKeyHex;
-    await _writeIndex(index);
+    await _indexStore.setActive(pubKeyHex);
   }
 
-  Future<_CapsulesIndex> _readIndex() async {
-    final docs = await getApplicationDocumentsDirectory();
-    final capsulesRoot = Directory('${docs.path}/$_capsulesDirName');
-    final indexFile = File('${capsulesRoot.path}/$_indexFileName');
-    if (!await indexFile.exists()) {
-      return _CapsulesIndex.empty();
-    }
-    try {
-      final raw = await indexFile.readAsString();
-      return _CapsulesIndex.fromJson(raw);
-    } catch (_) {
-      return _CapsulesIndex.empty();
-    }
+  Future<CapsulesIndex> _readIndex() async {
+    return _indexStore.read();
   }
 
-  Future<void> _writeIndex(_CapsulesIndex index) async {
-    final docs = await getApplicationDocumentsDirectory();
-    final capsulesRoot = Directory('${docs.path}/$_capsulesDirName');
-    if (!await capsulesRoot.exists()) {
-      await capsulesRoot.create(recursive: true);
-    }
-    final indexFile = File('${capsulesRoot.path}/$_indexFileName');
-    await indexFile.writeAsString(index.toJson(), flush: true);
+  Future<void> _writeIndex(CapsulesIndex index) async {
+    await _indexStore.write(index);
   }
 
   Future<void> _ensureIndexFromCurrentSeed(HivraBindings hivra) async {
@@ -725,17 +542,7 @@ class CapsulePersistenceService {
   Future<Map<String, dynamic>?> _readStateForCapsuleHex(
       String pubKeyHex) async {
     final dir = await _capsuleDirForHex(pubKeyHex);
-    final stateFile = File('${dir.path}/$_stateFileName');
-    if (!await stateFile.exists()) return null;
-    try {
-      final raw = await stateFile.readAsString();
-      final decoded = jsonDecode(raw);
-      if (decoded is Map<String, dynamic>) return decoded;
-      if (decoded is Map) return Map<String, dynamic>.from(decoded);
-      return null;
-    } catch (_) {
-      return null;
-    }
+    return _fileStore.readState(dir);
   }
 
   String _bytesToHex(Uint8List bytes) {
@@ -746,179 +553,12 @@ class CapsulePersistenceService {
     return b.toString();
   }
 
-  CapsuleLedgerSummary _parseLedgerSummary(String json) {
-    if (json.trim().isEmpty) return CapsuleLedgerSummary.empty();
-    try {
-      final decoded = jsonDecode(json);
-      if (decoded is! Map) return CapsuleLedgerSummary.empty();
-      final ledger = Map<String, dynamic>.from(decoded);
-      final eventsRaw = ledger['events'];
-      final events = eventsRaw is List ? eventsRaw : const [];
-
-      int relationshipEstablished = 0;
-      int relationshipBroken = 0;
-      int invitationSent = 0;
-      int invitationResolved = 0;
-      final activeStartersById = <String, int>{};
-
-      for (final eventRaw in events) {
-        if (eventRaw is! Map) continue;
-        final event = Map<String, dynamic>.from(eventRaw);
-        final kind = _eventKindCode(event['kind']);
-
-        switch (kind) {
-          case 1:
-            invitationSent++;
-            break;
-          case 2:
-          case 3:
-          case 4:
-            invitationResolved++;
-            break;
-          case 5:
-            final payload = _parseBytesField(event['payload']);
-            final starter = _parseStarterCreated(payload);
-            if (starter != null) {
-              activeStartersById[
-                      _bytesToHex(Uint8List.fromList(starter.starterId))] =
-                  starter.kindCode;
-            }
-            break;
-          case 6:
-            final payload = _parseBytesField(event['payload']);
-            final burnedId = _parseStarterBurnedId(payload);
-            if (burnedId != null) {
-              activeStartersById
-                  .remove(_bytesToHex(Uint8List.fromList(burnedId)));
-            }
-            break;
-          case 7:
-            relationshipEstablished++;
-            break;
-          case 8:
-            relationshipBroken++;
-            break;
-          default:
-            break;
-        }
-      }
-
-      final starterCount = activeStartersById.length.clamp(0, 5);
-      final relationshipCount =
-          (relationshipEstablished - relationshipBroken).clamp(0, 9999);
-      final pendingInvitations =
-          (invitationSent - invitationResolved).clamp(0, 9999);
-      final ledgerVersion = events.length;
-      final ledgerHashHex = _parseLedgerHashHex(ledger['last_hash']);
-
-      return CapsuleLedgerSummary(
-        starterCount: starterCount,
-        relationshipCount: relationshipCount,
-        pendingInvitations: pendingInvitations,
-        ledgerVersion: ledgerVersion,
-        ledgerHashHex: ledgerHashHex,
-      );
-    } catch (_) {
-      return CapsuleLedgerSummary.empty();
-    }
-  }
-
-  int _eventKindCode(dynamic rawKind) {
-    if (rawKind is num) return rawKind.toInt();
-    if (rawKind is! String) return -1;
-    switch (rawKind) {
-      case 'InvitationSent':
-        return 1;
-      case 'InvitationAccepted':
-        return 2;
-      case 'InvitationRejected':
-        return 3;
-      case 'InvitationExpired':
-        return 4;
-      case 'StarterCreated':
-        return 5;
-      case 'StarterBurned':
-        return 6;
-      case 'RelationshipEstablished':
-        return 7;
-      case 'RelationshipBroken':
-        return 8;
-      default:
-        return -1;
-    }
-  }
-
-  List<int>? _parseBytesField(dynamic raw) {
-    if (raw is List) {
-      final out = <int>[];
-      for (final item in raw) {
-        if (item is! num) return null;
-        final value = item.toInt();
-        if (value < 0 || value > 255) return null;
-        out.add(value);
-      }
-      return out;
-    }
-    if (raw is String) {
-      final trimmed = raw.trim();
-      if (trimmed.isEmpty) return null;
-      final isHex = RegExp(r'^[0-9a-fA-F]+$').hasMatch(trimmed);
-      if (isHex && trimmed.length.isEven) {
-        final out = <int>[];
-        for (int i = 0; i < trimmed.length; i += 2) {
-          out.add(int.parse(trimmed.substring(i, i + 2), radix: 16));
-        }
-        return out;
-      }
-      try {
-        return base64Decode(trimmed);
-      } catch (_) {
-        return null;
-      }
-    }
-    return null;
-  }
-
-  _StarterRecord? _parseStarterCreated(List<int>? payload) {
-    if (payload == null || payload.length < 66) return null;
-    final kindCode = payload[64];
-    if (kindCode < 0 || kindCode > 4) return null;
-    final starterId = payload.sublist(0, 32);
-    return _StarterRecord(kindCode: kindCode, starterId: starterId);
-  }
-
-  List<int>? _parseStarterBurnedId(List<int>? payload) {
-    if (payload == null || payload.length < 32) return null;
-    return payload.sublist(0, 32);
-  }
-
-  String _parseLedgerHashHex(dynamic raw) {
-    if (raw == null) return '0';
-    if (raw is int) {
-      return raw.toUnsigned(64).toRadixString(16);
-    }
-    if (raw is double) {
-      return raw.toInt().toUnsigned(64).toRadixString(16);
-    }
-    if (raw is String) {
-      final trimmed = raw.trim();
-      if (trimmed.isEmpty) return '0';
-      final dec = int.tryParse(trimmed);
-      if (dec != null) return dec.toUnsigned(64).toRadixString(16);
-      final hex = trimmed.startsWith('0x') ? trimmed.substring(2) : trimmed;
-      if (RegExp(r'^[0-9a-fA-F]+$').hasMatch(hex)) {
-        return hex.toLowerCase();
-      }
-    }
-    return '0';
-  }
-
   String? _extractOwnerHex(String ledgerJson) {
     try {
       final decoded = jsonDecode(ledgerJson);
       if (decoded is! Map) return null;
       final ledger = Map<String, dynamic>.from(decoded);
-      final ownerBytes = _parseBytesField(ledger['owner']);
+      final ownerBytes = _summaryParser.parseBytesField(ledger['owner']);
       if (ownerBytes == null || ownerBytes.length != 32) return null;
       return _bytesToHex(Uint8List.fromList(ownerBytes));
     } catch (_) {
@@ -946,153 +586,6 @@ class CapsulePersistenceService {
       return null;
     }
   }
-
-  Future<File> _seedFallbackFile() async {
-    final docs = await getApplicationDocumentsDirectory();
-    final capsulesRoot = Directory('${docs.path}/$_capsulesDirName');
-    if (!await capsulesRoot.exists()) {
-      await capsulesRoot.create(recursive: true);
-    }
-    return File('${capsulesRoot.path}/$_seedFallbackFileName');
-  }
-
-  Future<void> _writeSeedFallback(String pubKeyHex, String encodedSeed) async {
-    final file = await _seedFallbackFile();
-    Map<String, dynamic> map = {};
-    if (await file.exists()) {
-      try {
-        final raw = await file.readAsString();
-        final decoded = jsonDecode(raw);
-        if (decoded is Map) {
-          map = Map<String, dynamic>.from(decoded);
-        }
-      } catch (_) {}
-    }
-    map[pubKeyHex] = encodedSeed;
-    await file.writeAsString(jsonEncode(map), flush: true);
-  }
-
-  Future<String?> _readSeedFallback(String pubKeyHex) async {
-    final file = await _seedFallbackFile();
-    if (!await file.exists()) return null;
-    try {
-      final raw = await file.readAsString();
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) return null;
-      final map = Map<String, dynamic>.from(decoded);
-      final value = map[pubKeyHex];
-      return value is String ? value : null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Future<void> _deleteSeedFallback(String pubKeyHex) async {
-    final file = await _seedFallbackFile();
-    if (!await file.exists()) return;
-    try {
-      final raw = await file.readAsString();
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) return;
-      final map = Map<String, dynamic>.from(decoded);
-      map.remove(pubKeyHex);
-      await file.writeAsString(jsonEncode(map), flush: true);
-    } catch (_) {}
-  }
-
-  Uint8List? _decodeSeedString(String? encoded) {
-    if (encoded == null || encoded.isEmpty) return null;
-    try {
-      return Uint8List.fromList(base64Decode(encoded));
-    } catch (_) {
-      return null;
-    }
-  }
-}
-
-class CapsuleIndexEntry {
-  final String pubKeyHex;
-  final DateTime createdAt;
-  final DateTime lastActive;
-  final bool isGenesis;
-  final bool isNeste;
-
-  CapsuleIndexEntry({
-    required this.pubKeyHex,
-    required this.createdAt,
-    required this.lastActive,
-    required this.isGenesis,
-    required this.isNeste,
-  });
-
-  Map<String, dynamic> toMap() => {
-        'pubKeyHex': pubKeyHex,
-        'createdAt': createdAt.toIso8601String(),
-        'lastActive': lastActive.toIso8601String(),
-        'isGenesis': isGenesis,
-        'isNeste': isNeste,
-      };
-
-  static CapsuleIndexEntry fromMap(Map<String, dynamic> map) {
-    final created = DateTime.tryParse(map['createdAt']?.toString() ?? '') ??
-        DateTime.now().toUtc();
-    final last =
-        DateTime.tryParse(map['lastActive']?.toString() ?? '') ?? created;
-    return CapsuleIndexEntry(
-      pubKeyHex: map['pubKeyHex']?.toString() ?? '',
-      createdAt: created.toUtc(),
-      lastActive: last.toUtc(),
-      isGenesis: map['isGenesis'] == true,
-      isNeste: map['isNeste'] != false,
-    );
-  }
-}
-
-class CapsuleLedgerSummary {
-  final int starterCount;
-  final int relationshipCount;
-  final int pendingInvitations;
-  final int ledgerVersion;
-  final String ledgerHashHex;
-
-  CapsuleLedgerSummary({
-    required this.starterCount,
-    required this.relationshipCount,
-    required this.pendingInvitations,
-    required this.ledgerVersion,
-    required this.ledgerHashHex,
-  });
-
-  static CapsuleLedgerSummary empty() => CapsuleLedgerSummary(
-        starterCount: 0,
-        relationshipCount: 0,
-        pendingInvitations: 0,
-        ledgerVersion: 0,
-        ledgerHashHex: '0',
-      );
-}
-
-class CapsuleRuntimeBootstrap {
-  final String pubKeyHex;
-  final Uint8List seed;
-  final bool isGenesis;
-  final bool isNeste;
-  final String? ledgerJson;
-
-  CapsuleRuntimeBootstrap({
-    required this.pubKeyHex,
-    required this.seed,
-    required this.isGenesis,
-    required this.isNeste,
-    required this.ledgerJson,
-  });
-}
-
-class _StarterRecord {
-  final int kindCode;
-  final List<int> starterId;
-
-  _StarterRecord({required this.kindCode, required this.starterId});
 }
 
 class _BackupMeta {
@@ -1100,44 +593,4 @@ class _BackupMeta {
   final bool? isNeste;
 
   _BackupMeta({required this.isGenesis, required this.isNeste});
-}
-
-class _CapsulesIndex {
-  String? activePubKeyHex;
-  final Map<String, CapsuleIndexEntry> capsules;
-
-  _CapsulesIndex({required this.activePubKeyHex, required this.capsules});
-
-  static _CapsulesIndex empty() =>
-      _CapsulesIndex(activePubKeyHex: null, capsules: {});
-
-  static _CapsulesIndex fromJson(String raw) {
-    final decoded = jsonDecode(raw);
-    if (decoded is! Map) return _CapsulesIndex.empty();
-    final map = Map<String, dynamic>.from(decoded);
-    final active = map['active']?.toString();
-    final capsulesMap = <String, CapsuleIndexEntry>{};
-    final list = map['capsules'];
-    if (list is Map) {
-      final items = Map<String, dynamic>.from(list);
-      for (final entry in items.entries) {
-        if (entry.value is Map) {
-          capsulesMap[entry.key] =
-              CapsuleIndexEntry.fromMap(Map<String, dynamic>.from(entry.value));
-        }
-      }
-    }
-    return _CapsulesIndex(activePubKeyHex: active, capsules: capsulesMap);
-  }
-
-  String toJson() {
-    final capsulesJson = <String, dynamic>{};
-    for (final entry in capsules.entries) {
-      capsulesJson[entry.key] = entry.value.toMap();
-    }
-    return jsonEncode({
-      'active': activePubKeyHex,
-      'capsules': capsulesJson,
-    });
-  }
 }

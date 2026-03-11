@@ -156,20 +156,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   }
 
   Future<Map<String, Object?>?> _loadWorkerBootstrap() async {
-    final activeHex = await _persistence.resolveActiveCapsuleHex(_hivra);
-    CapsuleRuntimeBootstrap? bootstrap;
-    if (activeHex != null && activeHex.isNotEmpty) {
-      bootstrap = await _persistence.loadRuntimeBootstrap(activeHex);
-    }
-    bootstrap ??= await _persistence.loadRuntimeBootstrapForCurrent(_hivra);
-    if (bootstrap == null) return null;
-
-    return <String, Object?>{
-      'seed': bootstrap.seed,
-      'isGenesis': bootstrap.isGenesis,
-      'isNeste': bootstrap.isNeste,
-      'ledgerJson': bootstrap.ledgerJson,
-    };
+    return _persistence.loadWorkerBootstrapArgs(_hivra);
   }
 
   Future<void> _showBackupPrompt(int version) async {
@@ -232,6 +219,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     });
   }
 
+  Future<void> _handleLedgerChanged() async {
+    if (!mounted) return;
+    _loadCapsuleData();
+  }
+
   Future<void> _bootstrapActiveRuntime() async {
     final ok = await _persistence.bootstrapActiveCapsuleRuntime(_hivra);
     if (!mounted) return;
@@ -259,16 +251,19 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         return StartersScreen(
           key: ValueKey('starters-$_ledgerVersion'),
           hivra: _hivra,
+          onLedgerChanged: _handleLedgerChanged,
         );
       case 1:
         return InvitationsScreen(
           key: ValueKey('invitations-$_ledgerVersion'),
           hivra: _hivra,
+          onLedgerChanged: _handleLedgerChanged,
         );
       case 2:
         return RelationshipsScreen(
           key: ValueKey('relationships-$_ledgerVersion'),
           hivra: _hivra,
+          onLedgerChanged: _handleLedgerChanged,
         );
       case 3:
         return SettingsScreen(hivra: _hivra);
@@ -276,6 +271,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         return StartersScreen(
           key: ValueKey('starters-$_ledgerVersion'),
           hivra: _hivra,
+          onLedgerChanged: _handleLedgerChanged,
         );
     }
   }

@@ -8,6 +8,7 @@ import '../models/starter.dart';
 import '../widgets/invitation_card.dart';
 import '../ffi/hivra_bindings.dart';
 import '../services/capsule_persistence_service.dart';
+import '../services/capsule_state_manager.dart';
 import '../services/ledger_view_service.dart';
 
 bool _bootstrapWorkerRuntime(HivraBindings hivra, Map<String, Object?> args) {
@@ -57,8 +58,13 @@ Map<String, Object?> _receiveInvitationsInWorker(Map<String, Object?> args) {
 
 class InvitationsScreen extends StatefulWidget {
   final HivraBindings hivra;
+  final Future<void> Function()? onLedgerChanged;
 
-  const InvitationsScreen({super.key, required this.hivra});
+  const InvitationsScreen({
+    super.key,
+    required this.hivra,
+    this.onLedgerChanged,
+  });
 
   @override
   State<InvitationsScreen> createState() => _InvitationsScreenState();
@@ -81,6 +87,11 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
     setState(() {
       _invitations = service.loadInvitations();
     });
+  }
+
+  Future<void> _refreshAfterLedgerMutation() async {
+    await _loadInvitations(showLoading: false);
+    await widget.onLedgerChanged?.call();
   }
 
   Future<void> _sendInvitationAsync(Uint8List pubkey, int slot) async {
@@ -126,7 +137,7 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
       }
       await Future<void>.delayed(const Duration(seconds: 1));
       if (mounted) {
-        await _loadInvitations(showLoading: false);
+        await _refreshAfterLedgerMutation();
       }
     }
   }
@@ -218,7 +229,7 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
     if (!mounted) return;
 
     if (result >= 0) {
-      await _loadInvitations(showLoading: false);
+      await _refreshAfterLedgerMutation();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Fetched from Nostr: $result new event(s)')),
@@ -232,21 +243,7 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
   }
 
   Future<Map<String, Object?>?> _loadWorkerBootstrap() async {
-    final activeHex = await _persistence.resolveActiveCapsuleHex(widget.hivra);
-    CapsuleRuntimeBootstrap? bootstrap;
-    if (activeHex != null && activeHex.isNotEmpty) {
-      bootstrap = await _persistence.loadRuntimeBootstrap(activeHex);
-    }
-    bootstrap ??=
-        await _persistence.loadRuntimeBootstrapForCurrent(widget.hivra);
-    if (bootstrap == null) return null;
-
-    return <String, Object?>{
-      'seed': bootstrap.seed,
-      'isGenesis': bootstrap.isGenesis,
-      'isNeste': bootstrap.isNeste,
-      'ledgerJson': bootstrap.ledgerJson,
-    };
+    return _persistence.loadWorkerBootstrapArgs(widget.hivra);
   }
 
   Future<void> _acceptInvitation(Invitation invitation) async {
@@ -271,7 +268,7 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
     if (acceptCode == 0) {
       await _persistence.persistLedgerSnapshot(widget.hivra);
     }
-    await _loadInvitations();
+    await _refreshAfterLedgerMutation();
     if (mounted) setState(() => _processingId = null);
   }
 
@@ -345,7 +342,7 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
     if (ok) {
       await _persistence.persistLedgerSnapshot(widget.hivra);
     }
-    await _loadInvitations();
+    await _refreshAfterLedgerMutation();
     if (mounted) setState(() => _processingId = null);
   }
 
@@ -380,16 +377,23 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
         const SnackBar(content: Text('Failed to cancel invitation')),
       );
     }
-    await _loadInvitations();
+    if (ok) {
+      await _persistence.persistLedgerSnapshot(widget.hivra);
+    }
+    await _refreshAfterLedgerMutation();
     if (mounted) setState(() => _processingId = null);
   }
 
   void _showSendInvitationDialog() {
     final controller = TextEditingController();
-    final lockedSlots = _lockedStarterSlots();
+    final state = CapsuleStateManager(widget.hivra).state;
+    final lockedSlots = state.lockedStarterSlots;
     final availableSlots = <int>[
       for (var i = 0; i < 5; i++)
-        if (widget.hivra.starterExists(i) && !lockedSlots.contains(i)) i,
+        if (i < state.starterSlots.length &&
+            state.starterSlots[i].occupied &&
+            !lockedSlots.contains(i))
+          i,
     ];
     int? selectedSlot = availableSlots.isNotEmpty ? availableSlots.first : null;
 
@@ -450,45 +454,57 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
                   )
                 else
                   ...availableSlots.map((slot) {
-                    final kind = widget.hivra.getStarterType(slot);
+                    final kind = state.starterSlots[slot].kind;
                     final color = _starterColor(kind);
+                    final selected = selectedSlot == slot;
                     return Card(
                       margin: const EdgeInsets.only(bottom: 8),
-                      child: RadioListTile<int>(
-                        value: slot,
-                        groupValue: selectedSlot,
-                        onChanged: (value) =>
-                            setModalState(() => selectedSlot = value),
-                        title: Row(
-                          children: [
-                            Container(
-                              width: 12,
-                              height: 12,
-                              decoration: BoxDecoration(
-                                color: color,
-                                shape: BoxShape.circle,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: () => setModalState(() => selectedSlot = slot),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 14,
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                selected
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_off,
+                                color: selected ? color : Colors.grey,
                               ),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(kind),
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: color.withOpacity(0.18),
-                                borderRadius: BorderRadius.circular(999),
-                              ),
-                              child: Text(
-                                'Slot ${slot + 1}',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
+                              const SizedBox(width: 8),
+                              Container(
+                                width: 12,
+                                height: 12,
+                                decoration: BoxDecoration(
                                   color: color,
+                                  shape: BoxShape.circle,
                                 ),
                               ),
-                            ),
-                          ],
+                              const SizedBox(width: 8),
+                              Text(kind),
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: color.withValues(alpha: 0.18),
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: Text(
+                                  'Slot ${slot + 1}',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: color,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     );
@@ -544,133 +560,19 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
   }
 
   int _rejectReasonForInvitation(Invitation invitation) {
-    final activeKinds = _activeStarterKindsBySlot();
-    final hasMatchingStarter =
-        activeKinds.values.any((kind) => kind == invitation.kind);
-    final hasEmptySlot = List<int>.generate(5, (i) => i)
-        .any((slot) => !widget.hivra.starterExists(slot));
+    final state = CapsuleStateManager(widget.hivra).state;
+    final hasMatchingStarter = state.starterSlots.any(
+      (slot) => slot.occupied && _starterKindFromName(slot.kind) == invitation.kind,
+    );
+    final hasEmptySlot = state.starterSlots.any((slot) => !slot.occupied);
     return (!hasMatchingStarter && hasEmptySlot) ? 0 : 1;
   }
 
-  Map<int, StarterKind> _activeStarterKindsBySlot() {
-    final json = widget.hivra.exportLedger();
-    if (json == null || json.isEmpty) return const <int, StarterKind>{};
-
-    try {
-      final decoded = jsonDecode(json);
-      if (decoded is! Map<String, dynamic>) return const <int, StarterKind>{};
-      final eventsRaw = decoded['events'];
-      if (eventsRaw is! List) return const <int, StarterKind>{};
-
-      final activeKindsById = <String, StarterKind>{};
-      for (final raw in eventsRaw) {
-        if (raw is! Map) continue;
-        final event = Map<String, dynamic>.from(raw.cast<dynamic, dynamic>());
-        final kind = _eventKindCode(event['kind']);
-        final payload = _eventPayload(event['payload']);
-
-        if (kind == 5 && payload.length >= 66) {
-          final starterId = base64.encode(payload.sublist(0, 32));
-          final starterKind = _starterKindFromByte(payload[64]);
-          if (starterKind != null) {
-            activeKindsById[starterId] = starterKind;
-          }
-        } else if (kind == 6 && payload.length >= 32) {
-          activeKindsById.remove(base64.encode(payload.sublist(0, 32)));
-        }
-      }
-
-      final result = <int, StarterKind>{};
-      for (var slot = 0; slot < 5; slot++) {
-        if (!widget.hivra.starterExists(slot)) continue;
-        final starterId = widget.hivra.getStarterId(slot);
-        if (starterId == null) continue;
-        final starterKind = activeKindsById[base64.encode(starterId)];
-        if (starterKind != null) {
-          result[slot] = starterKind;
-        }
-      }
-      return result;
-    } catch (_) {
-      return const <int, StarterKind>{};
-    }
-  }
-
-  int _eventKindCode(dynamic value) {
-    if (value is int) return value;
-    if (value is String) {
-      switch (value) {
-        case 'CapsuleCreated':
-          return 0;
-        case 'InvitationSent':
-          return 1;
-        case 'InvitationAccepted':
-          return 2;
-        case 'InvitationRejected':
-          return 3;
-        case 'InvitationExpired':
-          return 4;
-        case 'StarterCreated':
-          return 5;
-        case 'StarterBurned':
-          return 6;
-        case 'RelationshipEstablished':
-          return 7;
-        case 'RelationshipBroken':
-          return 8;
-      }
-    }
-    return -1;
-  }
-
-  Uint8List _eventPayload(dynamic payload) {
-    if (payload is List) {
-      return Uint8List.fromList(
-          payload.whereType<num>().map((v) => v.toInt()).toList());
-    }
-    if (payload is String) {
-      try {
-        return Uint8List.fromList(base64.decode(payload));
-      } catch (_) {
-        return Uint8List(0);
-      }
-    }
-    return Uint8List(0);
-  }
-
-  StarterKind? _starterKindFromByte(int value) {
-    switch (value) {
-      case 0:
-        return StarterKind.juice;
-      case 1:
-        return StarterKind.spark;
-      case 2:
-        return StarterKind.seed;
-      case 3:
-        return StarterKind.pulse;
-      case 4:
-        return StarterKind.kick;
-      default:
-        return null;
-    }
-  }
-
-  Set<int> _lockedStarterSlots() {
-    final locked = <int>{};
-    for (final inv in _invitations) {
-      if (inv.isOutgoing &&
-          inv.status == InvitationStatus.pending &&
-          inv.starterSlot != null &&
-          !inv.isExpired) {
-        locked.add(inv.starterSlot!);
-      }
-    }
-    return locked;
-  }
-
   List<Widget> _lockedSlotRows(Set<int> lockedSlots) {
+    final state = CapsuleStateManager(widget.hivra).state;
     return lockedSlots.map((slot) {
-      final kind = widget.hivra.getStarterType(slot);
+      final kind =
+          slot < state.starterSlots.length ? state.starterSlots[slot].kind : 'Unknown';
       final color = _starterColor(kind);
       return Padding(
         padding: const EdgeInsets.only(top: 6),
@@ -686,6 +588,23 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
         ),
       );
     }).toList();
+  }
+
+  StarterKind? _starterKindFromName(String name) {
+    switch (name) {
+      case 'Juice':
+        return StarterKind.juice;
+      case 'Spark':
+        return StarterKind.spark;
+      case 'Seed':
+        return StarterKind.seed;
+      case 'Pulse':
+        return StarterKind.pulse;
+      case 'Kick':
+        return StarterKind.kick;
+      default:
+        return null;
+    }
   }
 
   Color _starterColor(String kind) {

@@ -356,8 +356,8 @@ class _LedgerInspectorScreenState extends State<LedgerInspectorScreen> {
   Widget _counterChip(String label, int value, Color color) {
     return Chip(
       label: Text('$label: $value'),
-      backgroundColor: color.withOpacity(0.18),
-      side: BorderSide(color: color.withOpacity(0.45)),
+      backgroundColor: color.withValues(alpha: 0.18),
+      side: BorderSide(color: color.withValues(alpha: 0.45)),
       labelStyle: TextStyle(color: color),
     );
   }

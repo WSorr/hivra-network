@@ -98,10 +98,18 @@ class _CapsuleSelectorScreenState extends State<CapsuleSelectorScreen> {
       return;
     }
 
-    final bootstrapped = await persistence.bootstrapRuntimeFromDisk(_hivra);
+    final bootstrapped =
+        await persistence.bootstrapActiveCapsuleRuntime(_hivra);
     if (!bootstrapped && mounted) {
+      final reason = await persistence.diagnoseActiveCapsuleBootstrap(_hivra);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to load capsule into runtime')),
+        SnackBar(
+          content: Text(
+            reason == null
+                ? 'Failed to load capsule into runtime'
+                : 'Failed to load capsule: $reason',
+          ),
+        ),
       );
       return;
     }
@@ -152,7 +160,8 @@ class _CapsuleSelectorScreenState extends State<CapsuleSelectorScreen> {
     final persistence = CapsulePersistenceService();
     try {
       final location = await getSaveLocation(
-        suggestedName: 'capsule-backup-${capsule.publicKeyHex.substring(0, 8)}.json',
+        suggestedName:
+            'capsule-backup-${capsule.publicKeyHex.substring(0, 8)}.json',
         acceptedTypeGroups: const [
           XTypeGroup(label: 'JSON', extensions: ['json']),
         ],
@@ -253,19 +262,13 @@ class _CapsuleSelectorScreenState extends State<CapsuleSelectorScreen> {
     }
 
     final seed = _hivra.mnemonicToSeed(phrase);
-    if (!_hivra.saveSeed(seed)) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to save seed')),
-      );
-      return;
-    }
-
-    final derivedPubKey = _hivra.capsulePublicKey();
-    final derivedHex = derivedPubKey != null && derivedPubKey.length == 32
-        ? _bytesToHex(derivedPubKey)
-        : null;
-    if (derivedHex != capsule.publicKeyHex) {
+    final persistence = CapsulePersistenceService();
+    final matches = await persistence.seedMatchesCapsule(
+      _hivra,
+      seed,
+      capsule.publicKeyHex,
+    );
+    if (!matches) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Seed does not match capsule')),
@@ -273,7 +276,6 @@ class _CapsuleSelectorScreenState extends State<CapsuleSelectorScreen> {
       return;
     }
 
-    final persistence = CapsulePersistenceService();
     await persistence.saveSeedForCapsule(capsule.publicKeyHex, seed);
     await _loadCapsules();
   }
@@ -326,8 +328,8 @@ class _CapsuleSelectorScreenState extends State<CapsuleSelectorScreen> {
                 width: 40,
                 height: 40,
                 decoration: BoxDecoration(
-                  color: capsule.network == 'NESTE' 
-                      ? Colors.green.shade900 
+                  color: capsule.network == 'NESTE'
+                      ? Colors.green.shade900
                       : Colors.orange.shade900,
                   shape: BoxShape.circle,
                 ),
@@ -341,7 +343,8 @@ class _CapsuleSelectorScreenState extends State<CapsuleSelectorScreen> {
               title: Row(
                 children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                     decoration: BoxDecoration(
                       color: capsule.network == 'NESTE'
                           ? Colors.green.shade900
@@ -362,7 +365,8 @@ class _CapsuleSelectorScreenState extends State<CapsuleSelectorScreen> {
                   Expanded(
                     child: Text(
                       _formatPubKeyHex(capsule.publicKeyHex),
-                      style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                      style: const TextStyle(
+                          fontFamily: 'monospace', fontSize: 12),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
@@ -435,7 +439,7 @@ class _CapsuleSelectorScreenState extends State<CapsuleSelectorScreen> {
   String _formatDate(DateTime date) {
     final now = DateTime.now();
     final difference = now.difference(date);
-    
+
     if (difference.inDays > 0) {
       return '${difference.inDays}d ago';
     } else if (difference.inHours > 0) {
@@ -452,7 +456,6 @@ class _CapsuleSelectorScreenState extends State<CapsuleSelectorScreen> {
     }
     return b.toString();
   }
-
 }
 
 class CapsuleInfo {

@@ -11,6 +11,8 @@
 
 extern crate alloc;
 
+use alloc::vec;
+use alloc::vec::Vec;
 use core::fmt;
 
 /// Time source trait — provides current timestamp.
@@ -169,6 +171,32 @@ pub struct Engine<T, R, C, K> {
     config: EngineConfig,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineError<E> {
+    Keystore(E),
+    MatchingInvitationNotFound,
+    NoMatchingStarter,
+    NoEmptySlot,
+    InvalidAcceptPlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedEvent {
+    pub event: Event,
+    pub recipient: Option<PubKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IncomingEffect {
+    Append(Event),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutgoingRejectionEffect {
+    BurnStarter { starter_id: StarterId },
+    UnlockOnly,
+}
+
 impl<T, R, C, K> Engine<T, R, C, K>
 where
     T: TimeSource,
@@ -232,6 +260,208 @@ where
     pub fn verify_event(&self, event: &Event, pubkey: &PubKey) -> Result<(), C::Error> {
         let msg = event.event_id();
         self.crypto.verify(&msg, pubkey.as_bytes(), event.signature().as_bytes())
+    }
+
+    pub fn prepare_invitation_sent(
+        &self,
+        starter_id: StarterId,
+        to_pubkey: PubKey,
+    ) -> Result<PreparedEvent, EngineError<K::Error>> {
+        let payload = InvitationSentPayload {
+            invitation_id: self.random_id(),
+            starter_id,
+            to_pubkey,
+        };
+
+        self.prepare_event(EventKind::InvitationSent, payload.to_bytes(), Some(to_pubkey))
+    }
+
+    pub fn prepare_invitation_accepted(
+        &self,
+        invitation_id: [u8; 32],
+        from_pubkey: PubKey,
+        created_starter_id: StarterId,
+    ) -> Result<PreparedEvent, EngineError<K::Error>> {
+        let payload = InvitationAcceptedPayload {
+            invitation_id,
+            from_pubkey,
+            created_starter_id,
+        };
+
+        self.prepare_event(
+            EventKind::InvitationAccepted,
+            payload.to_bytes(),
+            Some(from_pubkey),
+        )
+    }
+
+    pub fn prepare_invitation_rejected(
+        &self,
+        invitation_id: [u8; 32],
+        to_pubkey: PubKey,
+        reason: RejectReason,
+    ) -> Result<PreparedEvent, EngineError<K::Error>> {
+        let payload = InvitationRejectedPayload {
+            invitation_id,
+            reason,
+        };
+
+        self.prepare_event(
+            EventKind::InvitationRejected,
+            payload.to_bytes(),
+            Some(to_pubkey),
+        )
+    }
+
+    pub fn prepare_invitation_expired(
+        &self,
+        invitation_id: [u8; 32],
+    ) -> Result<PreparedEvent, EngineError<K::Error>> {
+        let payload = InvitationExpiredPayload { invitation_id };
+        self.prepare_event(EventKind::InvitationExpired, payload.to_bytes(), None)
+    }
+
+    pub fn prepare_starter_created(
+        &self,
+        starter_id: StarterId,
+        nonce: [u8; 32],
+        kind: StarterKind,
+        network: Network,
+    ) -> Result<PreparedEvent, EngineError<K::Error>> {
+        let payload = StarterCreatedPayload {
+            starter_id,
+            nonce,
+            kind,
+            network: network.to_byte(),
+        };
+        self.prepare_event(EventKind::StarterCreated, payload.to_bytes(), None)
+    }
+
+    pub fn prepare_starter_burned(
+        &self,
+        starter_id: StarterId,
+        reason: u8,
+    ) -> Result<PreparedEvent, EngineError<K::Error>> {
+        let payload = StarterBurnedPayload { starter_id, reason };
+        self.prepare_event(EventKind::StarterBurned, payload.to_bytes(), None)
+    }
+
+    pub fn prepare_relationship_established(
+        &self,
+        peer_pubkey: PubKey,
+        own_starter_id: StarterId,
+        peer_starter_id: StarterId,
+        kind: StarterKind,
+    ) -> Result<PreparedEvent, EngineError<K::Error>> {
+        let payload = RelationshipEstablishedPayload {
+            peer_pubkey,
+            own_starter_id,
+            peer_starter_id,
+            kind,
+        };
+        self.prepare_event(
+            EventKind::RelationshipEstablished,
+            payload.to_bytes(),
+            None,
+        )
+    }
+
+    pub fn resolve_accept_plan(
+        &self,
+        ledger: &Ledger,
+        invitation_id: [u8; 32],
+    ) -> Result<hivra_core::AcceptPlan, EngineError<K::Error>> {
+        let invitation = hivra_core::find_invitation(ledger, invitation_id)
+            .ok_or(EngineError::MatchingInvitationNotFound)?;
+        let slots = hivra_core::slot::SlotLayout::from_ledger(ledger);
+        let kind = self
+            .starter_kind_for_id(ledger, invitation.starter_id)
+            .ok_or(EngineError::MatchingInvitationNotFound)?;
+
+        Ok(hivra_core::plan_accept_for_kind(ledger, &slots, kind))
+    }
+
+    pub fn effects_for_incoming_accept(
+        &self,
+        ledger: &Ledger,
+        accepter_pubkey: PubKey,
+        payload: &InvitationAcceptedPayload,
+    ) -> Result<Vec<IncomingEffect>, EngineError<K::Error>> {
+        let invitation = hivra_core::find_invitation(ledger, payload.invitation_id)
+            .ok_or(EngineError::MatchingInvitationNotFound)?;
+        let kind = self
+            .starter_kind_for_id(ledger, invitation.starter_id)
+            .ok_or(EngineError::MatchingInvitationNotFound)?;
+
+        let relationship = self.prepare_relationship_established(
+            accepter_pubkey,
+            invitation.starter_id,
+            payload.created_starter_id,
+            kind,
+        )?;
+
+        Ok(vec![IncomingEffect::Append(relationship.event)])
+    }
+
+    pub fn effects_for_incoming_reject(
+        &self,
+        ledger: &Ledger,
+        payload: &InvitationRejectedPayload,
+    ) -> Result<OutgoingRejectionEffect, EngineError<K::Error>> {
+        let invitation = hivra_core::find_invitation(ledger, payload.invitation_id)
+            .ok_or(EngineError::MatchingInvitationNotFound)?;
+
+        Ok(match payload.reason {
+            RejectReason::EmptySlot => OutgoingRejectionEffect::BurnStarter {
+                starter_id: invitation.starter_id,
+            },
+            RejectReason::Other => OutgoingRejectionEffect::UnlockOnly,
+        })
+    }
+
+    fn prepare_event(
+        &self,
+        kind: EventKind,
+        payload: Vec<u8>,
+        recipient: Option<PubKey>,
+    ) -> Result<PreparedEvent, EngineError<K::Error>> {
+        let signer = self.public_key().map_err(EngineError::Keystore)?;
+        let timestamp = self.now();
+        let unsigned = Event::new(
+            kind,
+            payload,
+            timestamp,
+            Signature::from([0u8; 64]),
+            signer,
+        );
+        let signature = self.sign_event(&unsigned).map_err(EngineError::Keystore)?;
+        let event = Event::new(
+            kind,
+            unsigned.payload().to_vec(),
+            timestamp,
+            signature,
+            signer,
+        );
+
+        Ok(PreparedEvent { event, recipient })
+    }
+
+    fn starter_kind_for_id(&self, ledger: &Ledger, starter_id: StarterId) -> Option<StarterKind> {
+        for event in ledger.events() {
+            if event.kind() != EventKind::StarterCreated {
+                continue;
+            }
+
+            let Ok(payload) = StarterCreatedPayload::from_bytes(event.payload()) else {
+                continue;
+            };
+
+            if payload.starter_id == starter_id {
+                return Some(payload.kind);
+            }
+        }
+
+        None
     }
 }
 
@@ -329,5 +559,188 @@ mod tests {
         let id = engine.random_id();
 
         assert_eq!(id, [42; 32]); // From fixed RNG
+    }
+
+    #[test]
+    fn prepare_invitation_sent_creates_signed_event_and_recipient() {
+        let time = MockTime { now: 7 };
+        let rng = MockRng { fixed: [42; 32] };
+        let crypto = MockCrypto;
+        let keystore = MockKeyStore { pubkey: [1; 32] };
+        let engine = Engine::new(time, rng, crypto, keystore, EngineConfig::default());
+
+        let prepared = engine
+            .prepare_invitation_sent(StarterId::from([9; 32]), PubKey::from([2; 32]))
+            .unwrap();
+
+        assert_eq!(prepared.event.kind(), EventKind::InvitationSent);
+        assert_eq!(prepared.event.timestamp(), Timestamp::from(7));
+        assert_eq!(prepared.event.signer(), &PubKey::from([1; 32]));
+        assert_eq!(prepared.recipient, Some(PubKey::from([2; 32])));
+
+        let payload = InvitationSentPayload::from_bytes(prepared.event.payload()).unwrap();
+        assert_eq!(payload.invitation_id, [42; 32]);
+        assert_eq!(payload.starter_id, StarterId::from([9; 32]));
+        assert_eq!(payload.to_pubkey, PubKey::from([2; 32]));
+    }
+
+    #[test]
+    fn resolve_accept_plan_uses_core_projection() {
+        let time = MockTime { now: 0 };
+        let rng = MockRng { fixed: [42; 32] };
+        let crypto = MockCrypto;
+        let keystore = MockKeyStore { pubkey: [1; 32] };
+        let engine = Engine::new(time, rng, crypto, keystore, EngineConfig::default());
+        let owner = PubKey::from([1; 32]);
+        let mut ledger = Ledger::new(owner);
+
+        ledger
+            .append(Event::new(
+                EventKind::StarterCreated,
+                StarterCreatedPayload {
+                    starter_id: StarterId::from([4; 32]),
+                    nonce: [5; 32],
+                    kind: StarterKind::Seed,
+                    network: Network::Neste.to_byte(),
+                }
+                .to_bytes(),
+                Timestamp::from(1),
+                Signature::from([0; 64]),
+                owner,
+            ))
+            .unwrap();
+
+        ledger
+            .append(Event::new(
+                EventKind::InvitationSent,
+                InvitationSentPayload {
+                    invitation_id: [8; 32],
+                    starter_id: StarterId::from([4; 32]),
+                    to_pubkey: PubKey::from([9; 32]),
+                }
+                .to_bytes(),
+                Timestamp::from(2),
+                Signature::from([0; 64]),
+                owner,
+            ))
+            .unwrap();
+
+        let plan = engine.resolve_accept_plan(&ledger, [8; 32]).unwrap();
+        assert_eq!(
+            plan,
+            hivra_core::AcceptPlan::UseExistingStarter {
+                relationship_starter_id: StarterId::from([4; 32]),
+                created_starter: Some(hivra_core::PlannedStarterCreation {
+                    slot: SlotIndex::new(1).unwrap(),
+                    kind: StarterKind::Juice,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn incoming_accept_projects_relationship_for_sender() {
+        let time = MockTime { now: 11 };
+        let rng = MockRng { fixed: [42; 32] };
+        let crypto = MockCrypto;
+        let keystore = MockKeyStore { pubkey: [1; 32] };
+        let engine = Engine::new(time, rng, crypto, keystore, EngineConfig::default());
+        let owner = PubKey::from([1; 32]);
+        let mut ledger = Ledger::new(owner);
+
+        ledger
+            .append(Event::new(
+                EventKind::StarterCreated,
+                StarterCreatedPayload {
+                    starter_id: StarterId::from([3; 32]),
+                    nonce: [4; 32],
+                    kind: StarterKind::Juice,
+                    network: Network::Neste.to_byte(),
+                }
+                .to_bytes(),
+                Timestamp::from(1),
+                Signature::from([0; 64]),
+                owner,
+            ))
+            .unwrap();
+
+        ledger
+            .append(Event::new(
+                EventKind::InvitationSent,
+                InvitationSentPayload {
+                    invitation_id: [7; 32],
+                    starter_id: StarterId::from([3; 32]),
+                    to_pubkey: PubKey::from([2; 32]),
+                }
+                .to_bytes(),
+                Timestamp::from(2),
+                Signature::from([0; 64]),
+                owner,
+            ))
+            .unwrap();
+
+        let effects = engine
+            .effects_for_incoming_accept(
+                &ledger,
+                PubKey::from([2; 32]),
+                &InvitationAcceptedPayload {
+                    invitation_id: [7; 32],
+                    from_pubkey: PubKey::from([1; 32]),
+                    created_starter_id: StarterId::from([6; 32]),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(effects.len(), 1);
+        let IncomingEffect::Append(event) = &effects[0];
+        assert_eq!(event.kind(), EventKind::RelationshipEstablished);
+        let payload = RelationshipEstablishedPayload::from_bytes(event.payload()).unwrap();
+        assert_eq!(payload.peer_pubkey, PubKey::from([2; 32]));
+        assert_eq!(payload.own_starter_id, StarterId::from([3; 32]));
+        assert_eq!(payload.peer_starter_id, StarterId::from([6; 32]));
+        assert_eq!(payload.kind, StarterKind::Juice);
+    }
+
+    #[test]
+    fn incoming_empty_slot_reject_requires_sender_burn() {
+        let time = MockTime { now: 0 };
+        let rng = MockRng { fixed: [42; 32] };
+        let crypto = MockCrypto;
+        let keystore = MockKeyStore { pubkey: [1; 32] };
+        let engine = Engine::new(time, rng, crypto, keystore, EngineConfig::default());
+        let owner = PubKey::from([1; 32]);
+        let mut ledger = Ledger::new(owner);
+
+        ledger
+            .append(Event::new(
+                EventKind::InvitationSent,
+                InvitationSentPayload {
+                    invitation_id: [7; 32],
+                    starter_id: StarterId::from([3; 32]),
+                    to_pubkey: PubKey::from([2; 32]),
+                }
+                .to_bytes(),
+                Timestamp::from(2),
+                Signature::from([0; 64]),
+                owner,
+            ))
+            .unwrap();
+
+        let effect = engine
+            .effects_for_incoming_reject(
+                &ledger,
+                &InvitationRejectedPayload {
+                    invitation_id: [7; 32],
+                    reason: RejectReason::EmptySlot,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            effect,
+            OutgoingRejectionEffect::BurnStarter {
+                starter_id: StarterId::from([3; 32]),
+            }
+        );
     }
 }

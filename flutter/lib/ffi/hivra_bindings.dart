@@ -395,9 +395,9 @@ class HivraBindings {
 
   int receiveTransportMessages() => _transportReceive?.call() ?? -1002;
 
-  bool acceptInvitation(Uint8List invitationId, Uint8List fromPubkey, Uint8List createdStarterId) {
+  int acceptInvitationCode(Uint8List invitationId, Uint8List fromPubkey, Uint8List createdStarterId) {
     if (invitationId.length != 32 || fromPubkey.length != 32 || createdStarterId.length != 32) {
-      return false;
+      return -1;
     }
     final invitationIdPtr = calloc<Uint8>(32);
     final fromPubkeyPtr = calloc<Uint8>(32);
@@ -405,17 +405,21 @@ class HivraBindings {
     try {
       final acceptInvitationFn = _acceptInvitation;
       if (acceptInvitationFn == null) {
-        return false;
+        return -1002;
       }
       invitationIdPtr.asTypedList(32).setAll(0, invitationId);
       fromPubkeyPtr.asTypedList(32).setAll(0, fromPubkey);
       createdStarterIdPtr.asTypedList(32).setAll(0, createdStarterId);
-      return acceptInvitationFn(invitationIdPtr, fromPubkeyPtr, createdStarterIdPtr) == 0;
+      return acceptInvitationFn(invitationIdPtr, fromPubkeyPtr, createdStarterIdPtr);
     } finally {
       calloc.free(invitationIdPtr);
       calloc.free(fromPubkeyPtr);
       calloc.free(createdStarterIdPtr);
     }
+  }
+
+  bool acceptInvitation(Uint8List invitationId, Uint8List fromPubkey, Uint8List createdStarterId) {
+    return acceptInvitationCode(invitationId, fromPubkey, createdStarterId) == 0;
   }
 
   bool rejectInvitation(Uint8List invitationId, int reason) {

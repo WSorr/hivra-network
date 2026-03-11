@@ -4,31 +4,68 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:bech32/bech32.dart';
 import '../models/invitation.dart';
+import '../models/starter.dart';
 import '../widgets/invitation_card.dart';
 import '../ffi/hivra_bindings.dart';
+import '../services/capsule_persistence_service.dart';
 import '../services/ledger_view_service.dart';
 
-bool _sendInvitationInWorker(Map<String, Object> args) {
-  final hivra = HivraBindings();
-  final toPubkey = args['toPubkey'] as Uint8List;
-  final starterSlot = args['starterSlot'] as int;
-  return hivra.sendInvitation(toPubkey, starterSlot);
+bool _bootstrapWorkerRuntime(HivraBindings hivra, Map<String, Object?> args) {
+  final seed = args['seed'] as Uint8List;
+  final isGenesis = args['isGenesis'] as bool;
+  final isNeste = args['isNeste'] as bool;
+  final ledgerJson = args['ledgerJson'] as String?;
+
+  if (!hivra.saveSeed(seed)) return false;
+  if (!hivra.createCapsule(seed, isGenesis: isGenesis, isNeste: isNeste)) {
+    return false;
+  }
+  if (ledgerJson != null &&
+      ledgerJson.isNotEmpty &&
+      !hivra.importLedger(ledgerJson)) {
+    return false;
+  }
+  return true;
 }
 
-int _receiveInvitationsInWorker(Object? _) {
+Map<String, Object?> _sendInvitationInWorker(Map<String, Object?> args) {
   final hivra = HivraBindings();
-  return hivra.receiveTransportMessages();
+  if (!_bootstrapWorkerRuntime(hivra, args)) {
+    return <String, Object?>{'ok': false};
+  }
+
+  final toPubkey = args['toPubkey'] as Uint8List;
+  final starterSlot = args['starterSlot'] as int;
+  final ok = hivra.sendInvitation(toPubkey, starterSlot);
+  return <String, Object?>{
+    'ok': ok,
+    'ledgerJson': ok ? hivra.exportLedger() : null,
+  };
+}
+
+Map<String, Object?> _receiveInvitationsInWorker(Map<String, Object?> args) {
+  final hivra = HivraBindings();
+  if (!_bootstrapWorkerRuntime(hivra, args)) {
+    return <String, Object?>{'result': -1004};
+  }
+  final result = hivra.receiveTransportMessages();
+  return <String, Object?>{
+    'result': result,
+    'ledgerJson': hivra.exportLedger(),
+  };
 }
 
 class InvitationsScreen extends StatefulWidget {
-  const InvitationsScreen({super.key});
+  final HivraBindings hivra;
+
+  const InvitationsScreen({super.key, required this.hivra});
 
   @override
   State<InvitationsScreen> createState() => _InvitationsScreenState();
 }
 
 class _InvitationsScreenState extends State<InvitationsScreen> {
-  final HivraBindings _hivra = HivraBindings();
+  final CapsulePersistenceService _persistence = CapsulePersistenceService();
   List<Invitation> _invitations = [];
   bool _isFetchingFromNostr = false;
   String? _processingId;
@@ -40,20 +77,37 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
   }
 
   Future<void> _loadInvitations({bool showLoading = true}) async {
-    final service = LedgerViewService(_hivra);
+    final service = LedgerViewService(widget.hivra);
     setState(() {
       _invitations = service.loadInvitations();
     });
   }
 
   Future<void> _sendInvitationAsync(Uint8List pubkey, int slot) async {
-    final ok = await compute<Map<String, Object>, bool>(
+    final bootstrap = await _loadWorkerBootstrap();
+    if (bootstrap == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Active capsule bootstrap failed')),
+        );
+      }
+      return;
+    }
+
+    final workerResult =
+        await compute<Map<String, Object?>, Map<String, Object?>>(
       _sendInvitationInWorker,
-      <String, Object>{
+      <String, Object?>{
+        ...bootstrap,
         'toPubkey': pubkey,
         'starterSlot': slot,
       },
-    ).timeout(const Duration(seconds: 8), onTimeout: () => false);
+    ).timeout(
+      const Duration(seconds: 8),
+      onTimeout: () => <String, Object?>{'ok': false},
+    );
+    final ok = workerResult['ok'] == true;
+    final ledgerJson = workerResult['ledgerJson'] as String?;
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -66,6 +120,10 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
     }
 
     if (ok) {
+      if (ledgerJson != null && ledgerJson.isNotEmpty) {
+        widget.hivra.importLedger(ledgerJson);
+        await _persistence.persistLedgerSnapshot(widget.hivra);
+      }
       await Future<void>.delayed(const Duration(seconds: 1));
       if (mounted) {
         await _loadInvitations(showLoading: false);
@@ -89,8 +147,39 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
         return 'Receive API is not available in FFI';
       case -1003:
         return 'Fetch timed out';
+      case -1004:
+        return 'Active capsule bootstrap failed';
       default:
         return 'Receive failed (code $code)';
+    }
+  }
+
+  String _acceptErrorMessage(int code) {
+    switch (code) {
+      case -1:
+        return 'Invalid acceptance arguments';
+      case -2:
+        return 'Seed not found';
+      case -3:
+        return 'Failed to append InvitationAccepted';
+      case -4:
+        return 'Sender key derivation failed';
+      case -5:
+        return 'Capsule is not initialized';
+      case -6:
+        return 'Transport init failed';
+      case -7:
+        return 'Failed to send InvitationAccepted';
+      case -8:
+        return 'Matching incoming invitation not found in ledger';
+      case -9:
+        return 'No capacity to accept this invitation';
+      case -10:
+        return 'Failed to finalize local acceptance';
+      case -1002:
+        return 'Accept API is not available in FFI';
+      default:
+        return 'Failed to accept invitation (code $code)';
     }
   }
 
@@ -101,8 +190,25 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
     int result = -1003;
 
     try {
-      result = await compute<Object?, int>(_receiveInvitationsInWorker, null)
-          .timeout(const Duration(seconds: 12), onTimeout: () => -1003);
+      final bootstrap = await _loadWorkerBootstrap();
+      if (bootstrap == null) {
+        result = -1004;
+      } else {
+        final workerResult =
+            await compute<Map<String, Object?>, Map<String, Object?>>(
+          _receiveInvitationsInWorker,
+          bootstrap,
+        ).timeout(
+          const Duration(seconds: 12),
+          onTimeout: () => <String, Object?>{'result': -1003},
+        );
+        result = (workerResult['result'] as int?) ?? -1003;
+        final ledgerJson = workerResult['ledgerJson'] as String?;
+        if (result >= 0 && ledgerJson != null && ledgerJson.isNotEmpty) {
+          widget.hivra.importLedger(ledgerJson);
+          await _persistence.persistLedgerSnapshot(widget.hivra);
+        }
+      }
     } finally {
       if (mounted) {
         setState(() => _isFetchingFromNostr = false);
@@ -125,19 +231,45 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
     );
   }
 
+  Future<Map<String, Object?>?> _loadWorkerBootstrap() async {
+    final activeHex = await _persistence.resolveActiveCapsuleHex(widget.hivra);
+    CapsuleRuntimeBootstrap? bootstrap;
+    if (activeHex != null && activeHex.isNotEmpty) {
+      bootstrap = await _persistence.loadRuntimeBootstrap(activeHex);
+    }
+    bootstrap ??=
+        await _persistence.loadRuntimeBootstrapForCurrent(widget.hivra);
+    if (bootstrap == null) return null;
+
+    return <String, Object?>{
+      'seed': bootstrap.seed,
+      'isGenesis': bootstrap.isGenesis,
+      'isNeste': bootstrap.isNeste,
+      'ledgerJson': bootstrap.ledgerJson,
+    };
+  }
+
   Future<void> _acceptInvitation(Invitation invitation) async {
     setState(() => _processingId = invitation.id);
 
     final invitationId = _decodeB64_32(invitation.id);
     final fromPubkey = _decodeB64_32(invitation.fromPubkey);
-    final createdStarterId = _hivra.getStarterId(invitation.kind.index) ?? Uint8List(32);
-    final ok = invitationId != null &&
-        fromPubkey != null &&
-        _hivra.acceptInvitation(invitationId, fromPubkey, createdStarterId);
-    if (!ok && mounted) {
+    final placeholderStarterId = Uint8List(32);
+    final acceptCode = invitationId != null && fromPubkey != null
+        ? widget.hivra.acceptInvitationCode(
+            invitationId, fromPubkey, placeholderStarterId)
+        : -1;
+    if (acceptCode != 0 && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to accept invitation')),
+        SnackBar(
+          content: Text(
+            _acceptErrorMessage(acceptCode),
+          ),
+        ),
       );
+    }
+    if (acceptCode == 0) {
+      await _persistence.persistLedgerSnapshot(widget.hivra);
     }
     await _loadInvitations();
     if (mounted) setState(() => _processingId = null);
@@ -202,11 +334,16 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
     setState(() => _processingId = invitation.id);
 
     final invitationId = _decodeB64_32(invitation.id);
-    final ok = invitationId != null && _hivra.rejectInvitation(invitationId, 0);
+    final ok = invitationId != null &&
+        widget.hivra.rejectInvitation(
+            invitationId, _rejectReasonForInvitation(invitation));
     if (!ok && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Failed to reject invitation')),
       );
+    }
+    if (ok) {
+      await _persistence.persistLedgerSnapshot(widget.hivra);
     }
     await _loadInvitations();
     if (mounted) setState(() => _processingId = null);
@@ -236,7 +373,8 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
     setState(() => _processingId = invitation.id);
 
     final invitationId = _decodeB64_32(invitation.id);
-    final ok = invitationId != null && _hivra.expireInvitation(invitationId);
+    final ok =
+        invitationId != null && widget.hivra.expireInvitation(invitationId);
     if (!ok && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Failed to cancel invitation')),
@@ -251,10 +389,9 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
     final lockedSlots = _lockedStarterSlots();
     final availableSlots = <int>[
       for (var i = 0; i < 5; i++)
-        if (_hivra.starterExists(i) && !lockedSlots.contains(i)) i,
+        if (widget.hivra.starterExists(i) && !lockedSlots.contains(i)) i,
     ];
     int? selectedSlot = availableSlots.isNotEmpty ? availableSlots.first : null;
-
 
     showModalBottomSheet(
       context: context,
@@ -262,128 +399,136 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
       builder: (sheetContext) => StatefulBuilder(
         builder: (context, setModalState) {
           return Container(
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.of(context).viewInsets.bottom + 16,
-            left: 16,
-            right: 16,
-            top: 16,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'Send Invitation',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: controller,
-                decoration: const InputDecoration(
-                  labelText: 'Recipient Public Key',
-                  hintText: 'base64 / npub / hex',
-                  border: OutlineInputBorder(),
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+              left: 16,
+              right: 16,
+              top: 16,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Send Invitation',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                 ),
-                maxLines: 2,
-              ),
-              const SizedBox(height: 16),
-              const Align(
-                alignment: Alignment.centerLeft,
-                child: Text('Select Starter:', style: TextStyle(fontWeight: FontWeight.bold)),
-              ),
-              const SizedBox(height: 8),
-              if (availableSlots.isEmpty && lockedSlots.isEmpty)
-                const Card(
-                  child: ListTile(
-                    leading: Icon(Icons.warning_amber_rounded, color: Colors.orange),
-                    title: Text('No active starters'),
-                    subtitle: Text('You need at least one active starter to send invitations.'),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: controller,
+                  decoration: const InputDecoration(
+                    labelText: 'Recipient Public Key',
+                    hintText: 'base64 / npub / hex',
+                    border: OutlineInputBorder(),
                   ),
-                )
-              else if (availableSlots.isEmpty && lockedSlots.isNotEmpty)
-                const Card(
-                  child: ListTile(
-                    leading: Icon(Icons.lock_clock, color: Colors.orange),
-                    title: Text('Starters are locked'),
-                    subtitle: Text('Invitations lock starters for 24h. Cancel to unlock early.'),
-                  ),
-                )
-              else
-                ...availableSlots.map((slot) {
-                  final kind = _hivra.getStarterType(slot);
-                  final color = _starterColor(kind);
-                  return Card(
-                    margin: const EdgeInsets.only(bottom: 8),
-                    child: RadioListTile<int>(
-                      value: slot,
-                      groupValue: selectedSlot,
-                      onChanged: (value) => setModalState(() => selectedSlot = value),
-                      title: Row(
-                        children: [
-                          Container(
-                            width: 12,
-                            height: 12,
-                            decoration: BoxDecoration(
-                              color: color,
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(kind),
-                          const SizedBox(width: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: color.withOpacity(0.18),
-                              borderRadius: BorderRadius.circular(999),
-                            ),
-                            child: Text(
-                              'Slot ${slot + 1}',
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
+                  maxLines: 2,
+                ),
+                const SizedBox(height: 16),
+                const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Select Starter:',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+                const SizedBox(height: 8),
+                if (availableSlots.isEmpty && lockedSlots.isEmpty)
+                  const Card(
+                    child: ListTile(
+                      leading: Icon(Icons.warning_amber_rounded,
+                          color: Colors.orange),
+                      title: Text('No active starters'),
+                      subtitle: Text(
+                          'You need at least one active starter to send invitations.'),
+                    ),
+                  )
+                else if (availableSlots.isEmpty && lockedSlots.isNotEmpty)
+                  const Card(
+                    child: ListTile(
+                      leading: Icon(Icons.lock_clock, color: Colors.orange),
+                      title: Text('Starters are locked'),
+                      subtitle: Text(
+                          'Invitations lock starters for 24h. Cancel to unlock early.'),
+                    ),
+                  )
+                else
+                  ...availableSlots.map((slot) {
+                    final kind = widget.hivra.getStarterType(slot);
+                    final color = _starterColor(kind);
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      child: RadioListTile<int>(
+                        value: slot,
+                        groupValue: selectedSlot,
+                        onChanged: (value) =>
+                            setModalState(() => selectedSlot = value),
+                        title: Row(
+                          children: [
+                            Container(
+                              width: 12,
+                              height: 12,
+                              decoration: BoxDecoration(
                                 color: color,
+                                shape: BoxShape.circle,
                               ),
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 8),
+                            Text(kind),
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: color.withOpacity(0.18),
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                              child: Text(
+                                'Slot ${slot + 1}',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: color,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                  );
-                }),
-              if (lockedSlots.isNotEmpty) ...[
+                    );
+                  }),
+                if (lockedSlots.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  ..._lockedSlotRows(lockedSlots),
+                ],
                 const SizedBox(height: 8),
-                ..._lockedSlotRows(lockedSlots),
-              ],
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: selectedSlot == null
-                      ? null
-                      : () {
-                          final pubkey = _decodePubkey(controller.text);
-                          final slot = selectedSlot;
-                          if (pubkey == null || slot == null) {
-                            ScaffoldMessenger.of(this.context).showSnackBar(
-                              const SnackBar(content: Text('Invalid recipient public key')),
-                            );
-                            return;
-                          }
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: selectedSlot == null
+                        ? null
+                        : () {
+                            final pubkey = _decodePubkey(controller.text);
+                            final slot = selectedSlot;
+                            if (pubkey == null || slot == null) {
+                              ScaffoldMessenger.of(this.context).showSnackBar(
+                                const SnackBar(
+                                    content:
+                                        Text('Invalid recipient public key')),
+                              );
+                              return;
+                            }
 
-                          if (sheetContext.mounted) {
-                            FocusScope.of(sheetContext).unfocus();
-                            Navigator.of(sheetContext).pop();
-                          }
+                            if (sheetContext.mounted) {
+                              FocusScope.of(sheetContext).unfocus();
+                              Navigator.of(sheetContext).pop();
+                            }
 
-                          unawaited(_sendInvitationAsync(pubkey, slot));
-                        },
-                  icon: const Icon(Icons.send),
-                  label: const Text('Send'),
+                            unawaited(_sendInvitationAsync(pubkey, slot));
+                          },
+                    icon: const Icon(Icons.send),
+                    label: const Text('Send'),
+                  ),
                 ),
-              ),
-            ],
-          ),
-        );
+              ],
+            ),
+          );
         },
       ),
     );
@@ -395,6 +540,118 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
       return bytes.length == 32 ? Uint8List.fromList(bytes) : null;
     } catch (_) {
       return null;
+    }
+  }
+
+  int _rejectReasonForInvitation(Invitation invitation) {
+    final activeKinds = _activeStarterKindsBySlot();
+    final hasMatchingStarter =
+        activeKinds.values.any((kind) => kind == invitation.kind);
+    final hasEmptySlot = List<int>.generate(5, (i) => i)
+        .any((slot) => !widget.hivra.starterExists(slot));
+    return (!hasMatchingStarter && hasEmptySlot) ? 0 : 1;
+  }
+
+  Map<int, StarterKind> _activeStarterKindsBySlot() {
+    final json = widget.hivra.exportLedger();
+    if (json == null || json.isEmpty) return const <int, StarterKind>{};
+
+    try {
+      final decoded = jsonDecode(json);
+      if (decoded is! Map<String, dynamic>) return const <int, StarterKind>{};
+      final eventsRaw = decoded['events'];
+      if (eventsRaw is! List) return const <int, StarterKind>{};
+
+      final activeKindsById = <String, StarterKind>{};
+      for (final raw in eventsRaw) {
+        if (raw is! Map) continue;
+        final event = Map<String, dynamic>.from(raw.cast<dynamic, dynamic>());
+        final kind = _eventKindCode(event['kind']);
+        final payload = _eventPayload(event['payload']);
+
+        if (kind == 5 && payload.length >= 66) {
+          final starterId = base64.encode(payload.sublist(0, 32));
+          final starterKind = _starterKindFromByte(payload[64]);
+          if (starterKind != null) {
+            activeKindsById[starterId] = starterKind;
+          }
+        } else if (kind == 6 && payload.length >= 32) {
+          activeKindsById.remove(base64.encode(payload.sublist(0, 32)));
+        }
+      }
+
+      final result = <int, StarterKind>{};
+      for (var slot = 0; slot < 5; slot++) {
+        if (!widget.hivra.starterExists(slot)) continue;
+        final starterId = widget.hivra.getStarterId(slot);
+        if (starterId == null) continue;
+        final starterKind = activeKindsById[base64.encode(starterId)];
+        if (starterKind != null) {
+          result[slot] = starterKind;
+        }
+      }
+      return result;
+    } catch (_) {
+      return const <int, StarterKind>{};
+    }
+  }
+
+  int _eventKindCode(dynamic value) {
+    if (value is int) return value;
+    if (value is String) {
+      switch (value) {
+        case 'CapsuleCreated':
+          return 0;
+        case 'InvitationSent':
+          return 1;
+        case 'InvitationAccepted':
+          return 2;
+        case 'InvitationRejected':
+          return 3;
+        case 'InvitationExpired':
+          return 4;
+        case 'StarterCreated':
+          return 5;
+        case 'StarterBurned':
+          return 6;
+        case 'RelationshipEstablished':
+          return 7;
+        case 'RelationshipBroken':
+          return 8;
+      }
+    }
+    return -1;
+  }
+
+  Uint8List _eventPayload(dynamic payload) {
+    if (payload is List) {
+      return Uint8List.fromList(
+          payload.whereType<num>().map((v) => v.toInt()).toList());
+    }
+    if (payload is String) {
+      try {
+        return Uint8List.fromList(base64.decode(payload));
+      } catch (_) {
+        return Uint8List(0);
+      }
+    }
+    return Uint8List(0);
+  }
+
+  StarterKind? _starterKindFromByte(int value) {
+    switch (value) {
+      case 0:
+        return StarterKind.juice;
+      case 1:
+        return StarterKind.spark;
+      case 2:
+        return StarterKind.seed;
+      case 3:
+        return StarterKind.pulse;
+      case 4:
+        return StarterKind.kick;
+      default:
+        return null;
     }
   }
 
@@ -413,7 +670,7 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
 
   List<Widget> _lockedSlotRows(Set<int> lockedSlots) {
     return lockedSlots.map((slot) {
-      final kind = _hivra.getStarterType(slot);
+      final kind = widget.hivra.getStarterType(slot);
       final color = _starterColor(kind);
       return Padding(
         padding: const EdgeInsets.only(top: 6),
@@ -423,7 +680,8 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
             const SizedBox(width: 8),
             Text('Slot ${slot + 1} ($kind) locked'),
             const Spacer(),
-            const Text('Cancel to unlock', style: TextStyle(color: Colors.grey)),
+            const Text('Cancel to unlock',
+                style: TextStyle(color: Colors.grey)),
           ],
         ),
       );
@@ -488,7 +746,8 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
       } catch (_) {}
     }
     try {
-      final hex = value.replaceAll(':', '').replaceAll(' ', '').replaceAll('-', '');
+      final hex =
+          value.replaceAll(':', '').replaceAll(' ', '').replaceAll('-', '');
       if (hex.length == 64) {
         final bytes = <int>[];
         for (var i = 0; i < hex.length; i += 2) {
@@ -531,44 +790,45 @@ class _InvitationsScreenState extends State<InvitationsScreen> {
         ],
       ),
       body: RefreshIndicator(
-              onRefresh: _fetchFromNostr,
-              child: ListView(
-                padding: const EdgeInsets.all(16),
-                children: [
-                  _sectionHeader('Incoming', incoming.length),
-                  const SizedBox(height: 8),
-                  if (incoming.isEmpty)
-                    _emptySectionCard(
-                      icon: Icons.inbox_outlined,
-                      title: 'No incoming invitations',
-                      subtitle: 'Incoming requests will appear here.',
-                    )
-                  else
-                    ...incoming.map((inv) => InvitationCard(
-                          invitation: inv,
-                          onAccept: () => _acceptInvitation(inv),
-                          onReject: () => _rejectInvitation(inv),
-                          isLoading: _processingId == inv.id,
-                        )),
-                  const SizedBox(height: 20),
-                  _sectionHeader('Outgoing', outgoing.length),
-                  const SizedBox(height: 8),
-                  if (outgoing.isEmpty)
-                    _emptySectionCard(
-                      icon: Icons.outbox_outlined,
-                      title: 'No outgoing invitations',
-                      subtitle: 'Send invitations manually using recipient public keys.',
-                      onTap: _showSendInvitationDialog,
-                    )
-                  else
-                    ...outgoing.map((inv) => InvitationCard(
-                          invitation: inv,
-                          onCancel: () => _cancelInvitation(inv),
-                          isLoading: _processingId == inv.id,
-                        )),
-                ],
-              ),
-            ),
+        onRefresh: _fetchFromNostr,
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            _sectionHeader('Incoming', incoming.length),
+            const SizedBox(height: 8),
+            if (incoming.isEmpty)
+              _emptySectionCard(
+                icon: Icons.inbox_outlined,
+                title: 'No incoming invitations',
+                subtitle: 'Incoming requests will appear here.',
+              )
+            else
+              ...incoming.map((inv) => InvitationCard(
+                    invitation: inv,
+                    onAccept: () => _acceptInvitation(inv),
+                    onReject: () => _rejectInvitation(inv),
+                    isLoading: _processingId == inv.id,
+                  )),
+            const SizedBox(height: 20),
+            _sectionHeader('Outgoing', outgoing.length),
+            const SizedBox(height: 8),
+            if (outgoing.isEmpty)
+              _emptySectionCard(
+                icon: Icons.outbox_outlined,
+                title: 'No outgoing invitations',
+                subtitle:
+                    'Send invitations manually using recipient public keys.',
+                onTap: _showSendInvitationDialog,
+              )
+            else
+              ...outgoing.map((inv) => InvitationCard(
+                    invitation: inv,
+                    onCancel: () => _cancelInvitation(inv),
+                    isLoading: _processingId == inv.id,
+                  )),
+          ],
+        ),
+      ),
     );
   }
 

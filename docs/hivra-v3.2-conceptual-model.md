@@ -229,16 +229,19 @@ Phase 1: Initiation (A → B)
 
 Phase 2: Receive and Decide (B)
 
-B receives invitation and checks: is there an empty slot for type X?
+B receives invitation and checks:
 
-Case A: Empty slot + ACCEPT
+1. Do they already have a starter of type X?
+2. Is there any empty slot?
+
+Case A: No own X + empty slot + ACCEPT
 
 - B generates a NEW starter of type X
 - B creates InvitationAccepted
 - B creates RelationshipEstablished with A
 - A receives confirmation, unlocks their starter
 - A creates RelationshipEstablished with B
-- Result: both have their own X, relationship established
+- Result: relationship established using the newly created X
 
 Case B: Empty slot + REJECT (BURN)
 
@@ -248,21 +251,31 @@ Case B: Empty slot + REJECT (BURN)
 - A receives, DELETES their starter (burned)
 - Result: A lost starter, no relationship
 
-Case C: Slot occupied by own X + ACCEPT
+Case C: Own X exists + empty slot + ACCEPT
 
-- B creates InvitationAccepted (no new starter)
-- B creates RelationshipEstablished (friendship)
+- B keeps using their existing X for the relationship
+- B generates one NEW starter of a type that is still missing in their set
+- B creates InvitationAccepted
+- B creates RelationshipEstablished
 - A receives, unlocks their starter
 - A creates RelationshipEstablished
-- Result: relationship established, both keep starters
+- Result: relationship established on existing X, and B fills one missing type
 
-Case D: Slot occupied + REJECT
+Case D: Own X exists + no empty slot + ACCEPT
+
+- B creates InvitationAccepted
+- B creates RelationshipEstablished
+- A receives, unlocks their starter
+- A creates RelationshipEstablished
+- Result: relationship established, no new starter created
+
+Case E: Slot occupied + REJECT
 
 - B creates InvitationRejected with reason Other
 - A receives, unlocks their starter
 - Result: no relationship
 
-Case E: Timeout (B no response)
+Case F: Timeout (B no response)
 
 - A can cancel after 24 hours
 - Starter A is unlocked
@@ -271,7 +284,7 @@ Case E: Timeout (B no response)
 
 A starter is burned ONLY when ALL conditions are met:
 
-1. Recipient has an empty slot for that type
+1. Recipient has no starter of that type and has an empty slot
 2. Recipient explicitly rejects the invitation
 3. Recipient confirmed the burn warning
 
@@ -326,9 +339,10 @@ Used for: UI hints only, no protocol influence
 
 Scenario | Outcome
 --- | ---
-Invitation received, empty slot, accepted | New starter for B, relationship, starter A unlocked
+Invitation received, no own type, empty slot, accepted | New starter for B, relationship, starter A unlocked
+Invitation received, own type exists, empty slot, accepted | Relationship established on existing type, one missing starter created, starter A unlocked
+Invitation received, own type exists, no empty slot, accepted | Relationship established on existing type, starter A unlocked
 Invitation received, empty slot, rejected | STARTER A BURNED
-Invitation received, slot occupied, accepted | Friendly relationship, starter A unlocked
 Invitation received, slot occupied, rejected | Starter A unlocked, no relationship
 Recipient offline | Relay (if trusted) stores for 24h
 No response for 24h | Message deleted, starter A unlocked

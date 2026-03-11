@@ -8,7 +8,6 @@ use serde::{Serialize, Deserialize};
 /// Error type for ledger operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedgerError {
-    InvalidSignature,
     InvalidOrder,
     WrongVersion,
     DuplicateEvent,
@@ -55,10 +54,6 @@ impl Ledger {
             return Err(LedgerError::WrongVersion);
         }
 
-        if event.signer() != &self.owner {
-            return Err(LedgerError::InvalidSignature);
-        }
-
         if self.events.iter().any(|existing| existing == &event) {
             return Err(LedgerError::DuplicateEvent);
         }
@@ -98,10 +93,6 @@ impl Ledger {
 
         for (index, event) in self.events.iter().enumerate() {
             if event.version() != PROTOCOL_VERSION {
-                return false;
-            }
-
-            if event.signer() != &self.owner {
                 return false;
             }
 
@@ -190,6 +181,24 @@ mod tests {
         );
 
         ledger.append(event).expect("append succeeds");
+        assert!(ledger.verify());
+    }
+
+    #[test]
+    fn test_ledger_accepts_foreign_signed_event() {
+        let owner = PubKey::from([1u8; 32]);
+        let mut ledger = Ledger::new(owner);
+
+        let foreign_signer = PubKey::from([2u8; 32]);
+        let event = Event::new(
+            EventKind::InvitationSent,
+            vec![1, 2, 3],
+            Timestamp::from(1000),
+            Signature::from([9u8; 64]),
+            foreign_signer,
+        );
+
+        assert!(ledger.append(event).is_ok());
         assert!(ledger.verify());
     }
 }

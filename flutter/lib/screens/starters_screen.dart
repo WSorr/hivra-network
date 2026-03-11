@@ -7,14 +7,15 @@ import '../services/capsule_state_manager.dart';
 import '../services/capsule_persistence_service.dart';
 
 class StartersScreen extends StatefulWidget {
-  const StartersScreen({super.key});
+  final HivraBindings hivra;
+
+  const StartersScreen({super.key, required this.hivra});
 
   @override
   State<StartersScreen> createState() => _StartersScreenState();
 }
 
 class _StartersScreenState extends State<StartersScreen> {
-  final HivraBindings _hivra = HivraBindings();
   final CapsulePersistenceService _persistence = CapsulePersistenceService();
   List<Map<String, dynamic>> _slots = const [];
 
@@ -55,7 +56,7 @@ class _StartersScreenState extends State<StartersScreen> {
   }
 
   void _loadSlots() {
-    final stateManager = CapsuleStateManager(_hivra);
+    final stateManager = CapsuleStateManager(widget.hivra);
     stateManager.refresh();
     final starterSlots = stateManager.state.starterSlots;
 
@@ -181,12 +182,12 @@ class _StartersScreenState extends State<StartersScreen> {
                   throw Exception('Invalid starter slot');
                 }
 
-                final sent = _hivra.sendInvitation(pubkeyBytes, slotIndex);
+                final sent = widget.hivra.sendInvitation(pubkeyBytes, slotIndex);
                 if (!sent) {
                   throw Exception('transport send failed');
                 }
 
-                final persisted = await _persistence.persistLedgerSnapshot(_hivra);
+                final persisted = await _persistence.persistLedgerSnapshot(widget.hivra);
                 if (!persisted) {
                   throw Exception('ledger snapshot was not saved');
                 }

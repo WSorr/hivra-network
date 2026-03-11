@@ -3,7 +3,7 @@ use serde::{Serialize, Deserialize};
 use crate::primitives::{Network, PubKey};
 use crate::ledger::Ledger;
 use crate::event::EventKind;
-use crate::event_payloads::{EventPayload, StarterBurnedPayload, StarterCreatedPayload};
+use crate::slot::SlotLayout;
 
 /// Capsule type (Leaf = 0, Relay = 1)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,11 +44,14 @@ impl CapsuleState {
     /// Create state projection from capsule and its ledger.
     /// This is a pure function called by Engine, never by Core internally.
     pub fn from_capsule(capsule: &Capsule) -> Self {
+        let slot_layout = SlotLayout::from_ledger(&capsule.ledger);
         Self {
             public_key: capsule.pubkey.as_bytes().clone(),
             capsule_type: capsule.capsule_type as u8,
             network: capsule.network as u8,
-            slots: extract_slots_from_ledger(&capsule.ledger),
+            slots: slot_layout
+                .starter_ids()
+                .map(|starter_id| starter_id.map(|id| *id.as_bytes())),
             ledger_hash: capsule.ledger.last_hash(),
             relationships_count: count_relationships(&capsule.ledger),
             version: capsule.ledger.events().len() as u32,
@@ -65,61 +68,31 @@ pub struct Capsule {
     pub ledger: Ledger,
 }
 
-/// Helper to extract slot states from ledger.
-/// Slots are computed by scanning ledger events, never stored directly.
-fn extract_slots_from_ledger(ledger: &Ledger) -> [Option<[u8; 32]>; 5] {
-    let mut slots = [None, None, None, None, None];
-    
-    // Iterate through ledger events in order
+/// Count relationships from ledger
+fn count_relationships(ledger: &Ledger) -> u32 {
+    let mut established = 0u32;
+    let mut broken = 0u32;
+
     for event in ledger.events() {
         match event.kind() {
-            EventKind::StarterCreated => {
-                if let Ok(payload) = StarterCreatedPayload::from_bytes(event.payload()) {
-                    if let Some(slot_idx) = find_free_slot(&slots) {
-                        slots[slot_idx] = Some(*payload.starter_id.as_bytes());
-                    }
-                }
-            }
-            EventKind::StarterBurned => {
-                if let Ok(payload) = StarterBurnedPayload::from_bytes(event.payload()) {
-                    let starter_id = *payload.starter_id.as_bytes();
-                    // Remove starter from its slot
-                    for slot in slots.iter_mut() {
-                        if *slot == Some(starter_id) {
-                            *slot = None;
-                            break;
-                        }
-                    }
-                }
-            }
-            // Other events don't affect slots directly
+            EventKind::RelationshipEstablished => established += 1,
+            EventKind::RelationshipBroken => broken += 1,
             _ => {}
         }
     }
-    
-    slots
-}
 
-/// Count relationships from ledger
-fn count_relationships(ledger: &Ledger) -> u32 {
-    let mut count = 0;
-    for event in ledger.events() {
-        if let EventKind::RelationshipEstablished = event.kind() {
-            count += 1;
-        }
-    }
-    count
-}
-
-/// Find first free slot
-fn find_free_slot(slots: &[Option<[u8; 32]>; 5]) -> Option<usize> {
-    slots.iter().position(|slot| slot.is_none())
+    established.saturating_sub(broken)
 }
 
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::Event;
+    use crate::event_payloads::{
+        EventPayload, RelationshipBrokenPayload, RelationshipEstablishedPayload,
+    };
+    use crate::{Signature, StarterId, StarterKind, Timestamp};
 
     #[test]
     fn test_capsule_state_serialization() {
@@ -135,7 +108,45 @@ mod tests {
 
         let serialized = bincode::serialize(&state).unwrap();
         let deserialized: CapsuleState = bincode::deserialize(&serialized).unwrap();
-        
+
         assert_eq!(state, deserialized);
+    }
+
+    #[test]
+    fn counts_only_active_relationships() {
+        let owner = PubKey::from([1u8; 32]);
+        let mut ledger = Ledger::new(owner);
+
+        ledger
+            .append(Event::new(
+                EventKind::RelationshipEstablished,
+                RelationshipEstablishedPayload {
+                    peer_pubkey: PubKey::from([2u8; 32]),
+                    own_starter_id: StarterId::from([3u8; 32]),
+                    peer_starter_id: StarterId::from([4u8; 32]),
+                    kind: StarterKind::Juice,
+                }
+                .to_bytes(),
+                Timestamp::from(1),
+                Signature::from([0u8; 64]),
+                owner,
+            ))
+            .unwrap();
+
+        ledger
+            .append(Event::new(
+                EventKind::RelationshipBroken,
+                RelationshipBrokenPayload {
+                    peer_pubkey: PubKey::from([2u8; 32]),
+                    own_starter_id: StarterId::from([3u8; 32]),
+                }
+                .to_bytes(),
+                Timestamp::from(2),
+                Signature::from([0u8; 64]),
+                owner,
+            ))
+            .unwrap();
+
+        assert_eq!(count_relationships(&ledger), 0);
     }
 }

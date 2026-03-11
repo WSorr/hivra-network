@@ -101,7 +101,7 @@ class CapsuleState {
         if (item is! Map) continue;
         final kind = _kindCode(item['kind']);
         final payload = _payload(item['payload']);
-        if (kind == 1 && payload.length == 96) {
+        if (kind == 1 && (payload.length == 96 || payload.length == 97)) {
           pending.add(base64.encode(payload.sublist(0, 32)));
         } else if ((kind == 2 && payload.length == 96) || (kind == 3 && payload.length == 33) || (kind == 4 && payload.length == 32)) {
           pending.remove(base64.encode(payload.sublist(0, 32)));

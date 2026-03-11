@@ -3,26 +3,27 @@ import '../ffi/hivra_bindings.dart';
 import '../services/capsule_state_manager.dart';
 
 class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key});
+  final HivraBindings hivra;
+
+  const SettingsScreen({super.key, required this.hivra});
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  final HivraBindings _hivra = HivraBindings();
   bool _isNeste = true;
   bool _isRelay = false;
 
   @override
   void initState() {
     super.initState();
-    final state = CapsuleStateManager(_hivra).state;
+    final state = CapsuleStateManager(widget.hivra).state;
     _isNeste = state.isNeste;
   }
 
   void _showSeedPhrase() async {
-    final seed = _hivra.loadSeed();
+    final seed = widget.hivra.loadSeed();
     if (seed == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('No seed found')),

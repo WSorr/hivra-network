@@ -8,14 +8,15 @@ import '../ffi/hivra_bindings.dart';
 import '../services/ledger_view_service.dart';
 
 class RelationshipsScreen extends StatefulWidget {
-  const RelationshipsScreen({super.key});
+  final HivraBindings hivra;
+
+  const RelationshipsScreen({super.key, required this.hivra});
 
   @override
   State<RelationshipsScreen> createState() => _RelationshipsScreenState();
 }
 
 class _RelationshipsScreenState extends State<RelationshipsScreen> {
-  final HivraBindings _hivra = HivraBindings();
   List<Relationship> _relationships = [];
   bool _isLoading = true;
   String? _filterKind;
@@ -27,7 +28,7 @@ class _RelationshipsScreenState extends State<RelationshipsScreen> {
   }
 
   Future<void> _loadRelationships() async {
-    final service = LedgerViewService(_hivra);
+    final service = LedgerViewService(widget.hivra);
     setState(() {
       _relationships = service.loadRelationships();
       _isLoading = false;
@@ -65,7 +66,7 @@ class _RelationshipsScreenState extends State<RelationshipsScreen> {
               final payload = Uint8List(64);
               payload.setRange(0, 32, peer);
               payload.setRange(32, 64, own);
-              final ok = _hivra.ledgerAppendEvent(8, payload);
+              final ok = widget.hivra.ledgerAppendEvent(8, payload);
               Navigator.pop(context);
               if (!ok) {
                 ScaffoldMessenger.of(context).showSnackBar(

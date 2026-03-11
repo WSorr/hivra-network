@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:isolate';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../ffi/hivra_bindings.dart';
@@ -12,9 +12,28 @@ import 'invitations_screen.dart';
 import 'relationships_screen.dart';
 import 'settings_screen.dart';
 
-int _receiveTransportMessagesInWorker() {
+Map<String, Object?> _receiveTransportMessagesInWorker(
+    Map<String, Object?> args) {
   final hivra = HivraBindings();
-  return hivra.receiveTransportMessages();
+  final seed = args['seed'] as Uint8List;
+  final isGenesis = args['isGenesis'] as bool;
+  final isNeste = args['isNeste'] as bool;
+  final ledgerJson = args['ledgerJson'] as String?;
+
+  if (!hivra.saveSeed(seed)) return <String, Object?>{'result': -1004};
+  if (!hivra.createCapsule(seed, isGenesis: isGenesis, isNeste: isNeste)) {
+    return <String, Object?>{'result': -1004};
+  }
+  if (ledgerJson != null &&
+      ledgerJson.isNotEmpty &&
+      !hivra.importLedger(ledgerJson)) {
+    return <String, Object?>{'result': -1004};
+  }
+  final result = hivra.receiveTransportMessages();
+  return <String, Object?>{
+    'result': result,
+    'ledgerJson': hivra.exportLedger(),
+  };
 }
 
 class MainScreen extends StatefulWidget {
@@ -36,6 +55,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   bool _isBackupPromptOpen = false;
   bool _ledgerBaselineInitialized = false;
   bool _ledgerWatcherTickInProgress = false;
+  bool _bootstrapping = true;
 
   String _publicKeyHex = '';
   int _starterCount = 0;
@@ -57,13 +77,6 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     return '${_ledgerHashHex.substring(0, 8)}...${_ledgerHashHex.substring(_ledgerHashHex.length - 4)}';
   }
 
-  final List<Widget> _screens = const [
-    StartersScreen(),
-    InvitationsScreen(),
-    RelationshipsScreen(),
-    SettingsScreen(),
-  ];
-
   final List<String> _titles = const [
     'Starters',
     'Invitations',
@@ -76,8 +89,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _stateManager = CapsuleStateManager(_hivra);
-    _loadCapsuleData();
-    _startLedgerWatcher();
+    Future.microtask(_bootstrapActiveRuntime);
   }
 
   @override
@@ -108,13 +120,28 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _ledgerWatcherTickInProgress = true;
 
       try {
-        // Keep FFI network polling off the UI isolate to avoid input freezes.
-        await Isolate.run(_receiveTransportMessagesInWorker);
+        final bootstrap = await _loadWorkerBootstrap();
+        if (bootstrap != null) {
+          final workerResult =
+              await compute<Map<String, Object?>, Map<String, Object?>>(
+            _receiveTransportMessagesInWorker,
+            bootstrap,
+          );
+          final result = workerResult['result'] as int?;
+          final ledgerJson = workerResult['ledgerJson'] as String?;
+          if (ledgerJson != null && ledgerJson.isNotEmpty) {
+            _hivra.importLedger(ledgerJson);
+            if ((result ?? -1) >= 0) {
+              await _persistence.persistLedgerSnapshot(_hivra);
+            }
+          }
+        }
 
         _stateManager.refreshWithFullState();
         final nextVersion = _stateManager.state.version;
         if (nextVersion != _lastObservedLedgerVersion) {
           _lastObservedLedgerVersion = nextVersion;
+          _loadCapsuleData();
         }
         if (nextVersion > _lastPromptedLedgerVersion) {
           _lastPromptedLedgerVersion = nextVersion;
@@ -126,6 +153,23 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         _ledgerWatcherTickInProgress = false;
       }
     });
+  }
+
+  Future<Map<String, Object?>?> _loadWorkerBootstrap() async {
+    final activeHex = await _persistence.resolveActiveCapsuleHex(_hivra);
+    CapsuleRuntimeBootstrap? bootstrap;
+    if (activeHex != null && activeHex.isNotEmpty) {
+      bootstrap = await _persistence.loadRuntimeBootstrap(activeHex);
+    }
+    bootstrap ??= await _persistence.loadRuntimeBootstrapForCurrent(_hivra);
+    if (bootstrap == null) return null;
+
+    return <String, Object?>{
+      'seed': bootstrap.seed,
+      'isGenesis': bootstrap.isGenesis,
+      'isNeste': bootstrap.isNeste,
+      'ledgerJson': bootstrap.ledgerJson,
+    };
   }
 
   Future<void> _showBackupPrompt(int version) async {
@@ -178,9 +222,8 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
       _isNeste = state.isNeste;
       _ledgerHashHex = state.ledgerHashHex;
       _ledgerVersion = state.version;
-      _publicKeyHex = state.publicKey.isEmpty 
-          ? '' 
-          : base64.encode(state.publicKey);
+      _publicKeyHex =
+          state.publicKey.isEmpty ? '' : base64.encode(state.publicKey);
       if (!_ledgerBaselineInitialized) {
         _lastObservedLedgerVersion = state.version;
         _lastPromptedLedgerVersion = state.version;
@@ -189,8 +232,62 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     });
   }
 
+  Future<void> _bootstrapActiveRuntime() async {
+    final ok = await _persistence.bootstrapActiveCapsuleRuntime(_hivra);
+    if (!mounted) return;
+
+    if (!ok) {
+      setState(() {
+        _bootstrapping = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to bootstrap active capsule')),
+      );
+      return;
+    }
+
+    _loadCapsuleData();
+    _startLedgerWatcher();
+    setState(() {
+      _bootstrapping = false;
+    });
+  }
+
+  Widget _buildCurrentScreen() {
+    switch (_selectedIndex) {
+      case 0:
+        return StartersScreen(
+          key: ValueKey('starters-$_ledgerVersion'),
+          hivra: _hivra,
+        );
+      case 1:
+        return InvitationsScreen(
+          key: ValueKey('invitations-$_ledgerVersion'),
+          hivra: _hivra,
+        );
+      case 2:
+        return RelationshipsScreen(
+          key: ValueKey('relationships-$_ledgerVersion'),
+          hivra: _hivra,
+        );
+      case 3:
+        return SettingsScreen(hivra: _hivra);
+      default:
+        return StartersScreen(
+          key: ValueKey('starters-$_ledgerVersion'),
+          hivra: _hivra,
+        );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_bootstrapping) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: Text(_titles[_selectedIndex]),
@@ -213,7 +310,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                               vertical: 2,
                             ),
                             decoration: BoxDecoration(
-                              color: _isNeste ? Colors.green.shade900 : Colors.orange.shade900,
+                              color: _isNeste
+                                  ? Colors.green.shade900
+                                  : Colors.orange.shade900,
                               borderRadius: BorderRadius.circular(4),
                             ),
                             child: Text(
@@ -221,7 +320,9 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                               style: TextStyle(
                                 fontSize: 10,
                                 fontWeight: FontWeight.bold,
-                                color: _isNeste ? Colors.green.shade300 : Colors.orange.shade300,
+                                color: _isNeste
+                                    ? Colors.green.shade300
+                                    : Colors.orange.shade300,
                               ),
                             ),
                           ),
@@ -243,10 +344,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                             onPressed: _publicKeyHex.isEmpty
                                 ? null
                                 : () async {
-                                    await Clipboard.setData(ClipboardData(text: _publicKeyHex));
+                                    await Clipboard.setData(
+                                        ClipboardData(text: _publicKeyHex));
                                     if (!context.mounted) return;
                                     ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(content: Text('Public key copied')),
+                                      const SnackBar(
+                                          content: Text('Public key copied')),
                                     );
                                   },
                           ),
@@ -299,7 +402,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           ),
         ),
       ),
-      body: _screens[_selectedIndex],
+      body: _buildCurrentScreen(),
       bottomNavigationBar: BottomNavigationBar(
         type: BottomNavigationBarType.fixed,
         currentIndex: _selectedIndex,

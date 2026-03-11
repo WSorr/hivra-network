@@ -371,7 +371,7 @@ struct Event {
 Event | Fields
 --- | ---
 InvitationSent | invitation_id, starter_id, to_pubkey
-InvitationAccepted | invitation_id, from_pubkey, created_starter_id
+InvitationAccepted | invitation_id, from_pubkey, created_starter_id (recipient starter used for the relationship; if accept created a new invited starter, this is that starter ID)
 InvitationRejected | invitation_id, reason (EmptySlot | Other)
 InvitationExpired | invitation_id
 StarterCreated | starter_id, nonce, kind, network
@@ -394,13 +394,18 @@ Phase 1: Initiation (A → B)
 
 Phase 2: Receive (B)
 
-B receives invitation. Check: empty slot for type X?
+B receives invitation. Check:
+
+1. Is there already a starter of type X?
+2. Is there any empty slot?
 
 Situation | B Action | Result
 --- | --- | ---
-Empty slot + Accept | Create new Starter + InvitationAccepted + RelationshipEstablished | Both have X, relationship exists
+No own X + empty slot + Accept | Create new starter of type X + InvitationAccepted + RelationshipEstablished | Relationship uses the newly created X
+Own X exists + empty slot + Accept | Create one missing starter type + InvitationAccepted + RelationshipEstablished | Relationship uses existing X; created starter fills a missing type
+Own X exists + no empty slot + Accept | InvitationAccepted + RelationshipEstablished | Relationship uses existing X; no new starter is created
+No own X + no empty slot + Accept | Accept is impossible | No acceptance without capacity for invited type
 Empty slot + Reject | InvitationRejected(EmptySlot) | A's starter is burned
-Slot occupied by own X + Accept | InvitationAccepted + RelationshipEstablished | Friendly relationship
 Slot occupied + Reject | InvitationRejected(Other) | A's starter is unlocked
 Timeout (24h) | - | A's starter unlocked
 
@@ -408,7 +413,7 @@ Timeout (24h) | - | A's starter unlocked
 
 A starter is burned ONLY at the sender and only when ALL conditions are met:
 
-1. Recipient has an empty slot for the type.
+1. Recipient has no starter of the invited type and has an empty slot.
 2. Recipient explicitly rejects the invitation.
 3. Recipient confirmed the burn warning.
 4. Sender's starter is burned.

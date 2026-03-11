@@ -43,32 +43,31 @@ class LedgerViewService {
       final payload = _payloadBytes(e['payload']);
       final signer = _bytes32(e['signer']);
 
-      if (kind == 1 && (payload.length == 96 || payload.length == 97 || payload.length == 128 || payload.length == 129)) {
+      if (kind == 1 && (payload.length == 96 || payload.length == 97)) {
         final invitationId = payload.sublist(0, 32);
         final starterId = payload.sublist(32, 64);
         final toPubkey = payload.sublist(64, 96);
 
-        final hasKindByte = payload.length == 97 || payload.length == 129;
+        final hasKindByte = payload.length == 97;
         final kindFromPayload = hasKindByte ? _starterKindFromByte(payload[96]) : null;
 
-        final fromPubkey = payload.length == 128
-            ? payload.sublist(96, 128)
-            : payload.length == 129
-                ? payload.sublist(97, 129)
-                : signer;
+        final fromPubkey = signer;
 
         final id = base64.encode(invitationId);
         final current = byId[id];
         final starterSlot = _slotForStarterId(starterId, ownStarterBySlot);
-        // 128/129 payloads are receive-augmented (wire + from_pubkey), so always incoming.
-        // 96/97 payloads are local/original records; classify by explicit addressing.
-        final isIncomingByShape = payload.length == 128 || payload.length == 129;
-        final isIncomingByAddress = _eq32(toPubkey, self) && !_eq32(fromPubkey, self);
-        final computedIncoming = isIncomingByShape || isIncomingByAddress;
-        // Keep previously projected direction for the same invitation id to avoid
-        // flipping between sections when duplicate relay echoes arrive in different forms.
-        final isIncoming = current == null ? computedIncoming : current.isIncoming;
+        // Direction must be derived from the addressed capsule first.
+        // Signer can be local for replayed/projected ledger events, so treating
+        // `from == self` as proof of outgoing causes recipient-side invitations
+        // to render as if they were sent by the current capsule.
+        final isIncomingByAddress = _eq32(toPubkey, self);
+        // Prefer incoming when an explicitly addressed record proves the
+        // invitation belongs to the local capsule. This avoids getting stuck
+        // with an outgoing projection when the same invitation id later arrives
+        // from transport.
+        final isIncoming = isIncomingByAddress || (current?.isIncoming ?? false);
 
+        final expiresAt = timestamp.add(const Duration(hours: 24));
         InvitationStatus status = InvitationStatus.pending;
         DateTime? respondedAt;
         RejectionReason? rejectionReason;
@@ -83,6 +82,9 @@ class LedgerViewService {
         } else if (expiredAtById.containsKey(id)) {
           status = InvitationStatus.expired;
           respondedAt = expiredAtById[id];
+        } else if (expiresAt.isBefore(DateTime.now())) {
+          status = InvitationStatus.expired;
+          respondedAt = expiresAt;
         }
 
         byId[id] = Invitation(
@@ -93,7 +95,7 @@ class LedgerViewService {
           starterSlot: isIncoming ? null : (current?.starterSlot ?? starterSlot),
           status: status,
           sentAt: timestamp,
-          expiresAt: timestamp.add(const Duration(hours: 24)),
+          expiresAt: expiresAt,
           respondedAt: respondedAt,
           rejectionReason: rejectionReason,
         );

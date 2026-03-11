@@ -3,6 +3,8 @@
 use crate::{Message, Transport, TransportError};
 use nostr_sdk::nips::nip04;
 use nostr_sdk::prelude::*;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::runtime::{Builder, Runtime};
@@ -13,6 +15,13 @@ const WRITE_RETRY_DELAY_MS: u64 = 1200;
 const RELAY_SEND_ATTEMPTS: usize = 2;
 const CONNECT_POLL_MS: u64 = 250;
 const RECEIVE_LIMIT: usize = 200;
+const RECEIVE_SEEN_CAPACITY: usize = 2048;
+
+static SEEN_EVENT_IDS: OnceLock<Mutex<HashMap<[u8; 32], HashSet<String>>>> = OnceLock::new();
+
+fn seen_event_ids() -> &'static Mutex<HashMap<[u8; 32], HashSet<String>>> {
+    SEEN_EVENT_IDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 fn looks_like_nip04_content(content: &str) -> bool {
     let mut parts = content.splitn(2, "?iv=");
@@ -403,10 +412,24 @@ impl Transport for NostrTransport {
             })?;
         
         eprintln!("[Nostr] Received {} events", events.len());
+
+        let mut seen_guard = seen_event_ids().lock().expect("seen ids mutex poisoned");
+        let seen_for_pubkey = seen_guard
+            .entry(self.public_key_bytes())
+            .or_insert_with(HashSet::new);
         
         let mut messages = Vec::new();
         for event in events {
+            let event_id = event.id.to_hex();
+            if seen_for_pubkey.contains(&event_id) {
+                continue;
+            }
+
             if let Ok(msg) = self.decode_event(event) {
+                if seen_for_pubkey.len() >= RECEIVE_SEEN_CAPACITY {
+                    seen_for_pubkey.clear();
+                }
+                seen_for_pubkey.insert(event_id);
                 messages.push(msg);
             }
         }

@@ -1,7 +1,7 @@
 name: hivra_app
 description: Hivra - Hive Integrated Value & Relationship Architecture
 publish_to: 'none'
-version: 3.2.9+1
+version: 3.2.12+1
 
 environment:
   sdk: '>=3.2.0 <4.0.0'

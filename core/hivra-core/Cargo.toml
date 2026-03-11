@@ -1,6 +1,6 @@
 [package]
 name = "hivra-core"
-version = "3.2.7"
+version = "3.2.12"
 edition = "2021"
 authors = ["Hivra Team"]
 license = "MIT"

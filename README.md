@@ -4,7 +4,7 @@ Hivra is an infrastructure for relationships, not a social network. No likes, no
 
 ## Architecture
 
-This repository implements Hivra v3.2 specification:
+This repository implements Hivra v3.2.12 specification:
 
 - **Core** — Pure domain logic (deterministic, no I/O, no crypto knowledge)
 - **Engine** — Orchestration layer (time, RNG, crypto provider)

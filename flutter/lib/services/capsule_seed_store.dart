@@ -18,13 +18,21 @@ class CapsuleSeedStore {
   Future<void> storeSeed(String pubKeyHex, Uint8List seed) async {
     final encoded = base64.encode(seed);
     final key = '$_seedKeyPrefix$pubKeyHex';
-    await _secureStorage.write(key: key, value: encoded);
-    await _writeSeedFallback(pubKeyHex, encoded);
+    try {
+      await _secureStorage.write(key: key, value: encoded);
+      await deleteFallback(pubKeyHex);
+    } catch (_) {
+      await _writeSeedFallback(pubKeyHex, encoded);
+    }
   }
 
   Future<String?> readSecureEncoded(String pubKeyHex) async {
     final key = '$_seedKeyPrefix$pubKeyHex';
-    return _secureStorage.read(key: key);
+    try {
+      return _secureStorage.read(key: key);
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<Uint8List?> loadSeed(String pubKeyHex) async {
@@ -72,6 +80,7 @@ class CapsuleSeedStore {
   }) async {
     final secureSeed = _decodeSeedString(await readSecureEncoded(pubKeyHex));
     if (secureSeed != null && await isValidSeed(secureSeed)) {
+      await deleteFallback(pubKeyHex);
       return secureSeed;
     }
 

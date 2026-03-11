@@ -126,9 +126,7 @@ class CapsuleRuntimeBootstrapService {
     String pubKeyHex,
     String Function(Uint8List bytes) bytesToHex,
   ) async {
-    if (!hivra.saveSeed(seed)) return false;
-    if (!hivra.createCapsule(seed)) return false;
-    final derivedPubKey = hivra.capsulePublicKey();
+    final derivedPubKey = hivra.seedPublicKey(seed);
     if (derivedPubKey == null || derivedPubKey.length != 32) return false;
     return bytesToHex(derivedPubKey) == pubKeyHex;
   }

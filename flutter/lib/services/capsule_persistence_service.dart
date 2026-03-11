@@ -370,9 +370,7 @@ class CapsulePersistenceService {
     Uint8List seed,
     String pubKeyHex,
   ) async {
-    if (!hivra.saveSeed(seed)) return false;
-    if (!hivra.createCapsule(seed)) return false;
-    final derivedPubKey = hivra.capsulePublicKey();
+    final derivedPubKey = hivra.seedPublicKey(seed);
     if (derivedPubKey == null || derivedPubKey.length != 32) return false;
     return _bytesToHex(derivedPubKey) == pubKeyHex;
   }

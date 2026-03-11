@@ -67,6 +67,27 @@ pub unsafe extern "C" fn hivra_generate_random_seed(out_seed: *mut u8) -> i32 {
     0
 }
 
+/// Derive capsule public key from seed without mutating keystore/runtime
+#[no_mangle]
+pub unsafe extern "C" fn hivra_seed_public_key(seed_ptr: *const u8, out_key: *mut u8) -> i32 {
+    if seed_ptr.is_null() || out_key.is_null() {
+        return -1;
+    }
+
+    let seed_bytes = std::slice::from_raw_parts(seed_ptr, 32);
+    let mut seed_array = [0u8; 32];
+    seed_array.copy_from_slice(seed_bytes);
+    let seed = Seed(seed_array);
+
+    match derive_nostr_public_key(&seed) {
+        Ok(pubkey) => {
+            std::ptr::copy_nonoverlapping(pubkey.as_ptr(), out_key, 32);
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
 // ============ KEYCHAIN FUNCTIONS ============
 
 /// Check if seed exists in keystore

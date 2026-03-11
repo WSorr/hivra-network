@@ -27,6 +27,15 @@ typedef HivraMnemonicToSeedDart = int Function(
 typedef HivraGenerateRandomSeedC = Int32 Function(Pointer<Uint8> outSeed);
 typedef HivraGenerateRandomSeedDart = int Function(Pointer<Uint8> outSeed);
 
+typedef HivraSeedPublicKeyC = Int32 Function(
+  Pointer<Uint8> seed,
+  Pointer<Uint8> outKey,
+);
+typedef HivraSeedPublicKeyDart = int Function(
+  Pointer<Uint8> seed,
+  Pointer<Uint8> outKey,
+);
+
 typedef HivraFreeStringC = Void Function(Pointer<Int8> ptr);
 typedef HivraFreeStringDart = void Function(Pointer<Int8> ptr);
 
@@ -144,6 +153,7 @@ class HivraBindings {
   late final HivraSeedToMnemonicDart _seedToMnemonic;
   late final HivraMnemonicToSeedDart _mnemonicToSeed;
   late final HivraGenerateRandomSeedDart _generateRandomSeed;
+  late final HivraSeedPublicKeyDart _seedPublicKey;
   late final HivraFreeStringDart _freeString;
   late final HivraSeedExistsDart _seedExists;
   late final HivraSeedSaveDart _seedSave;
@@ -176,6 +186,10 @@ class HivraBindings {
     
     _generateRandomSeed = _lib
         .lookup<NativeFunction<HivraGenerateRandomSeedC>>('hivra_generate_random_seed')
+        .asFunction();
+
+    _seedPublicKey = _lib
+        .lookup<NativeFunction<HivraSeedPublicKeyC>>('hivra_seed_public_key')
         .asFunction();
     
     _freeString = _lib
@@ -300,6 +314,23 @@ class HivraBindings {
       return _seedSave(seedPtr) == 0;
     } finally {
       calloc.free(seedPtr);
+    }
+  }
+
+  Uint8List? seedPublicKey(Uint8List seed) {
+    if (seed.length != 32) return null;
+    final seedPtr = calloc<Uint8>(32);
+    final outPtr = calloc<Uint8>(32);
+    try {
+      seedPtr.asTypedList(32).setAll(0, seed);
+      final result = _seedPublicKey(seedPtr, outPtr);
+      if (result != 0) return null;
+      final key = Uint8List(32);
+      key.setAll(0, outPtr.asTypedList(32));
+      return key;
+    } finally {
+      calloc.free(seedPtr);
+      calloc.free(outPtr);
     }
   }
 

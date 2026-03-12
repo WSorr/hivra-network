@@ -26,6 +26,21 @@ Cargo.lock
 # Local tooling
 /.tooling/
 
+# Local release artifacts
+/dist/
+*.dmg
+*.zip
+SHA256SUMS.txt
+
+# Local user exports and backups
+capsule-backup-*.json
+hivra-ledger-*.json
+capsule-backup.v1.json
+ledger.json
+capsule_state.json
+capsules_index.json
+capsule_seeds.json
+
 # Local machine artifacts
 .DS_Store
 /.cargo/.crates.toml

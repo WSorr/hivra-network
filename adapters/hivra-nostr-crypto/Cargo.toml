@@ -6,7 +6,7 @@ description = "Nostr secp256k1 CryptoProvider adapter for Hivra Engine"
 license = "MIT"
 
 [dependencies]
-hivra-engine = { path = "../hivra-engine" }
+hivra-engine = { path = "../../core/hivra-engine" }
 secp256k1 = { version = "0.29", features = ["std", "rand", "serde"] }
 
 [features]

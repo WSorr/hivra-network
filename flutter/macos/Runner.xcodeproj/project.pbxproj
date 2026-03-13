@@ -402,7 +402,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "# Copy FFI Library\nLIB_SRC=\"/Volumes/Dev/projects/hivra/target/debug/libhivra_ffi.dylib\"\nAPP_PATH=\"${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Frameworks/\"\n\necho \"=== Copying FFI Library ===\"\necho \"From: ${LIB_SRC}\"\necho \"To: ${APP_PATH}\"\n\nmkdir -p \"${APP_PATH}\"\ncp -f \"${LIB_SRC}\" \"${APP_PATH}\"\n\nif [ -f \"${APP_PATH}/libhivra_ffi.dylib\" ]; then\n    echo \"✅ Library copied successfully\"\n    ls -la \"${APP_PATH}/libhivra_ffi.dylib\"\nelse\n    echo \"❌ Failed to copy library\"\n    exit 1\nfi\n";
+			shellScript = "\"${SRCROOT}/copy_ffi.sh\"\n";
 		};
 		960476CAE11900C33321E1A7 /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;

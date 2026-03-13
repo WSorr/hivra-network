@@ -1,39 +1,36 @@
 #!/bin/bash
-# Copy FFI library to Frameworks folder
+set -euo pipefail
 
-# Resolve library path relative to this project instead of using a hardcoded machine-specific path.
 PROJECT_ROOT="${SRCROOT}/../.."
-LIB_SRC_DEBUG="${PROJECT_ROOT}/target/debug/libhivra_ffi.dylib"
-LIB_SRC_RELEASE="${PROJECT_ROOT}/target/release/libhivra_ffi.dylib"
-APP_PATH="${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Frameworks/"
+APP_PATH="${TARGET_BUILD_DIR}/${WRAPPER_NAME}/Contents/Frameworks"
+UNIVERSAL_LIB="${APP_PATH}/libhivra_ffi.dylib"
 
-if [ -f "${LIB_SRC_DEBUG}" ]; then
-    LIB_SRC="${LIB_SRC_DEBUG}"
-elif [ -f "${LIB_SRC_RELEASE}" ]; then
-    LIB_SRC="${LIB_SRC_RELEASE}"
+if [ "${CONFIGURATION:-Debug}" = "Release" ]; then
+    CARGO_PROFILE_FLAG="--release"
+    LIB_SUBDIR="release"
 else
-    echo "ERROR: Library not found. Checked:"
-    echo "  - ${LIB_SRC_DEBUG}"
-    echo "  - ${LIB_SRC_RELEASE}"
-    exit 1
+    CARGO_PROFILE_FLAG=""
+    LIB_SUBDIR="debug"
 fi
 
-echo "=== Copying FFI Library ==="
-echo "LIB_SRC: ${LIB_SRC}"
-echo "APP_PATH: ${APP_PATH}"
+ARM_TARGET="aarch64-apple-darwin"
+INTEL_TARGET="x86_64-apple-darwin"
+ARM_LIB="${PROJECT_ROOT}/target/${ARM_TARGET}/${LIB_SUBDIR}/libhivra_ffi.dylib"
+INTEL_LIB="${PROJECT_ROOT}/target/${INTEL_TARGET}/${LIB_SUBDIR}/libhivra_ffi.dylib"
+
+echo "=== Building universal Hivra FFI ==="
+echo "PROJECT_ROOT: ${PROJECT_ROOT}"
+echo "CONFIGURATION: ${CONFIGURATION:-Debug}"
+
+cd "${PROJECT_ROOT}"
+cargo build -p hivra-ffi --target "${ARM_TARGET}" ${CARGO_PROFILE_FLAG}
+cargo build -p hivra-ffi --target "${INTEL_TARGET}" ${CARGO_PROFILE_FLAG}
 
 mkdir -p "${APP_PATH}"
-cp -v "${LIB_SRC}" "${APP_PATH}"
+lipo -create -output "${UNIVERSAL_LIB}" "${ARM_LIB}" "${INTEL_LIB}"
+install_name_tool -id "@rpath/libhivra_ffi.dylib" "${UNIVERSAL_LIB}"
+chmod 755 "${UNIVERSAL_LIB}"
 
-if [ -f "${APP_PATH}/libhivra_ffi.dylib" ]; then
-    echo "SUCCESS: Library copied"
-    ls -la "${APP_PATH}/libhivra_ffi.dylib"
-    
-    # Fix library install name
-    install_name_tool -id "@rpath/libhivra_ffi.dylib" "${APP_PATH}/libhivra_ffi.dylib"
-else
-    echo "ERROR: Library not found after copy"
-    exit 1
-fi
-
+echo "SUCCESS: Universal library created"
+file "${UNIVERSAL_LIB}"
 echo "=== Copy complete ==="
